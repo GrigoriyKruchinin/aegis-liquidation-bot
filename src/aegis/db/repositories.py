@@ -22,7 +22,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.sql.dml import ReturningInsert
 
 from aegis.core.errors import NotFoundError, RepositoryError
-from aegis.core.models import HealthCheck, MarketRef, OpportunitySummary
+from aegis.core.models import (
+    ActivityStats,
+    HealthCheck,
+    MarketRef,
+    MarketStats,
+    OpportunitySummary,
+)
 from aegis.db.models import BorrowerRow, IndexerCheckpointRow, NotificationRow, OpportunityRow
 
 # Stored health factors are clamped to fit NUMERIC(38, 18).
@@ -254,3 +260,62 @@ class SqlNotificationRepository:
                     opportunity_id=opportunity_id, channel=channel, status=status, error=error
                 )
             )
+
+
+class SqlStatusRepository:
+    """`IStatusRepository`: aggregate queries for the status report (read-only)."""
+
+    def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
+        self._sessions = sessions
+
+    async def market_stats(self, hf_threshold: Decimal) -> dict[str, MarketStats]:
+        """Active borrowers, total debt, at-risk count and min HF per market."""
+        at_risk = func.count().filter(BorrowerRow.health_factor < hf_threshold)
+        stmt = (
+            select(
+                BorrowerRow.chain,
+                BorrowerRow.protocol,
+                BorrowerRow.market,
+                func.count(),
+                func.coalesce(func.sum(BorrowerRow.debt_usd), 0),
+                at_risk,
+                func.min(BorrowerRow.health_factor),
+            )
+            .where(BorrowerRow.active)
+            .group_by(BorrowerRow.chain, BorrowerRow.protocol, BorrowerRow.market)
+        )
+        async with self._sessions() as session:
+            rows = (await session.execute(stmt)).all()
+        return {
+            MarketRef(chain, protocol, market, "").key: MarketStats(
+                active_borrowers=int(count),
+                total_debt_usd=Decimal(debt or 0),
+                at_risk=int(risky),
+                min_health_factor=None if min_hf is None else Decimal(min_hf),
+            )
+            for chain, protocol, market, count, debt, risky, min_hf in rows
+        }
+
+    async def activity_since(self, since: datetime) -> ActivityStats:
+        """Opportunities detected and opportunity alerts delivered since `since`."""
+        opportunities = select(func.count(), func.max(OpportunityRow.net_profit_usd)).where(
+            OpportunityRow.detected_at >= since
+        )
+        alerts = (
+            select(NotificationRow.status, func.count())
+            .where(
+                NotificationRow.created_at >= since,
+                NotificationRow.opportunity_id.is_not(None),
+                NotificationRow.status.in_(("sent", "failed")),
+            )
+            .group_by(NotificationRow.status)
+        )
+        async with self._sessions() as session:
+            count, best = (await session.execute(opportunities)).one()
+            by_status = {status: int(n) for status, n in (await session.execute(alerts)).all()}
+        return ActivityStats(
+            opportunities=int(count),
+            best_net_profit_usd=None if best is None else Decimal(best),
+            alerts_sent=by_status.get("sent", 0),
+            alerts_failed=by_status.get("failed", 0),
+        )

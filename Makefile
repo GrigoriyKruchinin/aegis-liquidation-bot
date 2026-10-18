@@ -1,4 +1,4 @@
-.PHONY: install format format-check lint typecheck test test-integration check migrate up-local down-local logs-local ps-local contracts-test
+.PHONY: install format format-check lint typecheck test test-integration check migrate up-local down-local logs-local ps-local contracts-test rpc-latency
 
 COMPOSE_LOCAL = docker compose -f docker-compose.local.yml
 
@@ -45,3 +45,7 @@ ps-local:
 
 contracts-test:
 	cd contracts && forge test -vvv
+
+# Compare configured RPC endpoints (latency + head freshness); uses your .env
+rpc-latency:
+	uv run python -m aegis.tools.rpc_latency

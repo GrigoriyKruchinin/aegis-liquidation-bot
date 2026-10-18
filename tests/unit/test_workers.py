@@ -51,17 +51,26 @@ def test_beat_schedule_per_chain() -> None:
         telegram_bot_token=SecretStr("1:x"),
         telegram_chat_id="1",
         enabled_chains=["base", "optimism"],
-        watchlist_interval_seconds=6,
         min_profit_usd=Decimal(5),
     )
     schedule = build_beat_schedule(settings)
     assert set(schedule) == {
         "index-base",
         "scan-full-base",
-        "scan-watchlist-base",
         "index-optimism",
         "scan-full-optimism",
-        "scan-watchlist-optimism",
+        "status-report",
     }
-    assert schedule["scan-watchlist-base"]["schedule"] == 6.0
+    assert schedule["status-report"]["schedule"] == 3600.0  # hourly by default
+    assert schedule["status-report"]["options"]["queue"] == "notify"
     assert schedule["scan-full-base"]["options"]["queue"] == "scan"
+
+
+def test_status_report_can_be_disabled() -> None:
+    settings = AppSettings(
+        _env_file=None,
+        telegram_bot_token=SecretStr("1:x"),
+        telegram_chat_id="1",
+        status_report_interval_hours=0,
+    )
+    assert "status-report" not in build_beat_schedule(settings)

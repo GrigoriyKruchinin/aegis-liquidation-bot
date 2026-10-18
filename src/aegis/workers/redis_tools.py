@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 
 from redis.asyncio import Redis
 
-HEARTBEAT_KEY = "aegis:heartbeat:scan"
+HEARTBEAT_PREFIX = "aegis:heartbeat:"
 
 
 class RedisAlertDeduplicator:
@@ -60,14 +60,19 @@ class RedisTaskLock:
                 await self._redis.eval(_RELEASE_SCRIPT, 1, key, token)  # type: ignore[misc]
 
 
+async def record_heartbeat(redis: Redis, name: str = "scan") -> None:
+    """Record that a component is alive (consumed by container healthchecks and reports)."""
+    await redis.set(f"{HEARTBEAT_PREFIX}{name}", str(int(time.time())), ex=3600)
+
+
 async def beat_heartbeat(redis: Redis) -> None:
-    """Record that a scan task ran (consumed by container healthchecks)."""
-    await redis.set(HEARTBEAT_KEY, str(int(time.time())), ex=3600)
+    """Record that a scheduled scan task ran."""
+    await record_heartbeat(redis, "scan")
 
 
-async def heartbeat_age_seconds(redis: Redis) -> float | None:
-    """Seconds since the last heartbeat, or None if never recorded."""
-    raw = await redis.get(HEARTBEAT_KEY)
+async def heartbeat_age_seconds(redis: Redis, name: str = "scan") -> float | None:
+    """Seconds since the last heartbeat of `name`, or None if never recorded."""
+    raw = await redis.get(f"{HEARTBEAT_PREFIX}{name}")
     if raw is None:
         return None
     return time.time() - int(raw)

@@ -6,11 +6,13 @@ import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from typing import Protocol
 
 from aegis.config.chains import ChainConfig
 from aegis.core.models import (
+    ActivityStats,
     Call,
     CallResult,
     GasEstimate,
@@ -20,6 +22,7 @@ from aegis.core.models import (
     LogEntry,
     LogFilter,
     MarketRef,
+    MarketStats,
     OpportunitySummary,
     Position,
     ProfitEstimate,
@@ -133,6 +136,17 @@ class BaseLendingProtocol(ABC):
     def quote_liquidations(self, position: Position) -> list[LiquidationQuote]:
         """Compute self-funded liquidation quotes for every viable debt/collateral pair."""
 
+    def price_calls(self) -> list[Call]:
+        """Calls reading every price this market uses (batched chain-wide by the watcher).
+
+        Adapters that do not support price-move triggers return an empty list.
+        """
+        return []
+
+    def parse_prices(self, results: Sequence[CallResult]) -> tuple[int, ...]:
+        """Decode `price_calls` results into raw prices (0 for unreadable entries)."""
+        return ()
+
 
 class IPriceOracle(Protocol):
     """Native token USD price source used for gas costing."""
@@ -241,3 +255,13 @@ class INotificationRepository(Protocol):
     async def record(
         self, opportunity_id: int | None, channel: str, status: str, error: str | None = None
     ) -> None: ...
+
+
+class IStatusRepository(Protocol):
+    """Read-only aggregates for the periodic status report."""
+
+    async def market_stats(self, hf_threshold: Decimal) -> dict[str, MarketStats]:
+        """Stats keyed by `MarketRef.key`."""
+        ...
+
+    async def activity_since(self, since: datetime) -> ActivityStats: ...

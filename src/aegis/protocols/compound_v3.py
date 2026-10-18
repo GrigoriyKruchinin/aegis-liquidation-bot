@@ -363,6 +363,21 @@ class CompoundV3Protocol(BaseLendingProtocol):
             )
         ]
 
+    def price_calls(self) -> list[Call]:
+        """`getPrice` for the base feed and every collateral feed."""
+        if self._base_feed is None:
+            return []
+        feeds = [self._base_feed, *(a.price_feed for a in self._assets)]
+        return [Call(self._comet, GET_PRICE.encode(feed)) for feed in feeds]
+
+    def parse_prices(self, results: Sequence[CallResult]) -> tuple[int, ...]:
+        """Raw feed prices (8 decimals), base first."""
+        prices: list[int] = []
+        for result in results:
+            decoded = decode_result(GET_PRICE, result)
+            prices.append(int(decoded[0]) if decoded else 0)
+        return tuple(prices)
+
 
 @PROTOCOLS.register(PROTOCOL_NAME)
 def create_compound_v3(

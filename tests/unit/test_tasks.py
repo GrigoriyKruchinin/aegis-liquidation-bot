@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 
 import fakeredis
@@ -9,6 +11,7 @@ import pytest
 from celery.exceptions import Retry
 
 from aegis.core.errors import NotFoundError, NotificationError
+from aegis.core.models import ActivityStats, StatusReport
 from aegis.workers import runtime, tasks
 from tests.factories import summary
 from tests.fakes import MemoryDeduplicator, MemoryOpportunityRepository
@@ -35,6 +38,11 @@ class FakeNotifications:
         self.records.append((opportunity_id, channel, status))
 
 
+class FakeReporter:
+    async def build(self, period_hours: int) -> StatusReport:
+        return StatusReport(datetime.now(UTC), period_hours, (), ActivityStats(0, None, 0, 0), None)
+
+
 @dataclass
 class FakeContainer:
     notifier: FakeNotifier = field(default_factory=FakeNotifier)
@@ -42,6 +50,10 @@ class FakeContainer:
     notifications: FakeNotifications = field(default_factory=FakeNotifications)
     deduplicator: MemoryDeduplicator = field(default_factory=MemoryDeduplicator)
     redis: fakeredis.FakeAsyncRedis = field(default_factory=fakeredis.FakeAsyncRedis)
+    status_reporter: FakeReporter = field(default_factory=lambda: FakeReporter())
+    settings: SimpleNamespace = field(
+        default_factory=lambda: SimpleNamespace(status_report_interval_hours=6)
+    )
 
 
 @pytest.fixture
@@ -123,3 +135,10 @@ def test_notify_missing_opportunity_is_dropped(
     monkeypatch.setattr(container.opportunities, "get", missing)
     _apply(99)
     assert container.notifier.sent == []
+
+
+def test_notify_status_sends_report(container: FakeContainer) -> None:
+    tasks.notify_status.apply(throw=True)
+    assert "Aegis status" in container.notifier.sent[0]
+    assert "last 6h" in container.notifier.sent[0]
+    assert container.notifications.records == [(None, "telegram", "sent")]

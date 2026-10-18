@@ -13,11 +13,15 @@ from aegis.core.container import Container, describe_markets
 from aegis.core.errors import NotFoundError, NotificationError, TelegramRateLimitError
 from aegis.core.logging import configure_logging, get_logger
 from aegis.core.redact import safe_error
-from aegis.notifier.templates import render_opportunity, render_startup
+from aegis.notifier.templates import render_opportunity, render_startup, render_status
 from aegis.scanner.orchestrator import ScanMode, alert_key
 from aegis.workers import runtime
 from aegis.workers.app import app
-from aegis.workers.dispatcher import NOTIFY_OPPORTUNITY_TASK, NOTIFY_SYSTEM_TASK
+from aegis.workers.dispatcher import (
+    NOTIFY_OPPORTUNITY_TASK,
+    NOTIFY_STATUS_TASK,
+    NOTIFY_SYSTEM_TASK,
+)
 from aegis.workers.redis_tools import beat_heartbeat, mark_sent, was_sent
 
 logger = get_logger("workers.tasks")
@@ -139,6 +143,22 @@ def notify_system(self: Task[Any, Any], text: str) -> None:
         except NotificationError as exc:
             await c.notifications.record(None, "telegram", "failed", safe_error(exc))
             raise self.retry(countdown=30, exc=exc) from exc
+        await c.notifications.record(None, "telegram", "sent")
+
+    runtime.run(body)
+
+
+@app.task(name=NOTIFY_STATUS_TASK, bind=True, max_retries=3, ignore_result=True)
+def notify_status(self: Task[Any, Any]) -> None:
+    """Build and deliver the periodic 📊 status report."""
+
+    async def body(c: Container) -> None:
+        report = await c.status_reporter.build(c.settings.status_report_interval_hours or 1)
+        try:
+            await c.notifier.send(render_status(report))
+        except NotificationError as exc:
+            await c.notifications.record(None, "telegram", "failed", safe_error(exc))
+            raise self.retry(countdown=60, exc=exc) from exc
         await c.notifications.record(None, "telegram", "sent")
 
     runtime.run(body)

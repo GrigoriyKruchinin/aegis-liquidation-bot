@@ -69,7 +69,8 @@ class SchedulerSettings(_EnvSettings):
     )
     index_interval_seconds: int = Field(default=60, ge=5)
     scan_interval_seconds: int = Field(default=30, ge=5)
-    watchlist_interval_seconds: int = Field(default=6, ge=1)
+    #: Periodic "bot is alive" Telegram report; 0 disables it.
+    status_report_interval_hours: int = Field(default=1, ge=0, le=168)
 
     @field_validator("enabled_chains", mode="before")
     @classmethod
@@ -112,6 +113,11 @@ class AppSettings(DatabaseSettings, SchedulerSettings):
     min_profit_usd: Decimal = Field(default=Decimal("5"), ge=0)
     watchlist_hf_threshold: Decimal = Field(default=Decimal("1.05"), gt=1)
     min_debt_usd: Decimal = Field(default=Decimal("10"), ge=0)
+    # --- Fast watcher (per-block hot-set checks + price-move triggers) ----------------------
+    watcher_min_interval_ms: int = Field(default=1000, ge=100, le=60_000)
+    watcher_head_poll_ms: int = Field(default=200, ge=50, le=10_000)
+    watcher_price_move_bps: int = Field(default=50, ge=1, le=5000)
+    watcher_rescan_cooldown_seconds: int = Field(default=5, ge=1, le=600)
     indexer_lookback_days: int = Field(default=30, ge=1)
     indexer_log_chunk_blocks: int = Field(default=2000, ge=1)
     indexer_max_blocks_per_run: int = Field(default=200_000, ge=1)

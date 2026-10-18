@@ -10,7 +10,10 @@ from aegis.config.settings import SchedulerSettings, get_scheduler_settings
 
 
 def build_beat_schedule(settings: SchedulerSettings) -> dict[str, dict[str, Any]]:
-    """Per-chain periodic tasks: indexer sync, full scan and fast watchlist scan."""
+    """Per-chain periodic tasks (indexer sync, full scan) and the status report.
+
+    Near-liquidation positions are re-checked every block by the `watcher` service, not here.
+    """
     schedule: dict[str, dict[str, Any]] = {}
     for chain in settings.enabled_chains:
         schedule[f"index-{chain}"] = {
@@ -25,11 +28,12 @@ def build_beat_schedule(settings: SchedulerSettings) -> dict[str, dict[str, Any]
             "args": (chain,),
             "options": {"queue": "scan", "expires": settings.scan_interval_seconds},
         }
-        schedule[f"scan-watchlist-{chain}"] = {
-            "task": "aegis.scan.watchlist",
-            "schedule": float(settings.watchlist_interval_seconds),
-            "args": (chain,),
-            "options": {"queue": "scan", "expires": settings.watchlist_interval_seconds},
+    if settings.status_report_interval_hours > 0:
+        interval = settings.status_report_interval_hours * 3600
+        schedule["status-report"] = {
+            "task": "aegis.notify.status",
+            "schedule": float(interval),
+            "options": {"queue": "notify", "expires": interval},
         }
     return schedule
 

@@ -64,7 +64,10 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress
 ### 1.6 Borrower indexer & scanner
 - [x] Incremental event indexer (checkpoint per market in DB, adaptive chunked `eth_getLogs`, reorg safety margin, bounded blocks per run)
 - [x] `HealthFactorScanner`: batch HF checks, filter `HF < 1.0` above dust, emit opportunities
-- [x] Watchlist of near-liquidation positions (HF < `WATCHLIST_HF_THRESHOLD`) scanned every 6s
+- [x] Watchlist of near-liquidation positions (HF < `WATCHLIST_HF_THRESHOLD`) — re-checked on **every block** by the `watcher` service
+- [x] Fast `watcher` service (asyncio, one loop per chain, block phase-locked head polling): per-block hot-set checks + chain-wide oracle price snapshot in one multicall; price move ≥ `WATCHER_PRICE_MOVE_BPS` triggers an immediate background full rescan
+- [x] `make rpc-latency` — compare configured RPC endpoints (round trip + head freshness)
+- [x] Hourly 📊 status report to Telegram (`STATUS_REPORT_INTERVAL_HOURS`)
 - [x] Orchestrator iterating registered markets per chain (no protocol-specific code)
 
 ### 1.7 Profit estimator
@@ -156,6 +159,16 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress
 - [ ] 📊 Daily digest (Celery beat): deals, win/loss, gross/net, gas, per-chain breakdown
 - [ ] 📊 Monthly summary on the 1st of every month
 - [ ] `/audit-security` pass on V2
+
+### 2.8 Competitive latency (win liquidations, not just detect them)
+- [ ] Measure end-to-end: block produced → opportunity detected → tx included; track win rate vs competing liquidators (who liquidated our misses, in which block)
+- [ ] Freshest data source per chain: dedicated/self-hosted nodes in the sequencer's region; WebSocket `newHeads` instead of polling
+- [ ] Base / OP-stack: consume **Flashblocks** (~200 ms preconfirmations) to see state before the 2 s block is sealed
+- [ ] Arbitrum: evaluate **Timeboost** express lane vs plain FCFS ordering; minimise latency to the sequencer endpoint
+- [ ] Predictive engine: per position, precompute the oracle price at which HF < 1; react to oracle update transactions / events immediately instead of waiting for the next scan
+- [ ] Pre-built calldata + pre-signed tx templates per hot position (only amount/nonce/gas updated at send time); direct submission to the sequencer
+- [ ] Gas/priority-fee bidding strategy bounded by expected profit
+- [ ] Event-driven cache of borrower balances (apply `Supply`/`Borrow`/`Repay`/`Withdraw`/`Transfer` events) to avoid RPC reads on the hot path
 
 ### 2.7 Hardening carried over from the V1 audit (MUST be addressed in V2)
 - [ ] **(V1 audit LOW-7) RPC failover stickiness** — `EvmChainProvider._active` never returns to the primary endpoint after a single failure (`src/aegis/chains/evm.py`, `_request`). Add periodic re-probing of endpoint #0 (e.g. after N seconds or N successful calls on a fallback) and per-endpoint health stats; prefer private/sequencer RPC for execution, Alchemy only as fallback. Unit-test the recovery path.

@@ -79,3 +79,42 @@ async def test_opportunity_roundtrip_and_notification(
     assert loaded.notes == original.notes
     assert loaded.detected_at == original.detected_at
     await SqlNotificationRepository(sessions).record(opportunity_id, "telegram", "sent")
+
+
+async def test_status_aggregates(sessions: async_sessionmaker[AsyncSession]) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from aegis.db.repositories import SqlStatusRepository
+
+    borrowers = SqlBorrowerRepository(sessions)
+    a, b, c = "0x" + "a1" * 20, "0x" + "b1" * 20, "0x" + "c1" * 20
+    await borrowers.upsert_discovered(MARKET, {a: 1, b: 1, c: 1})
+    await borrowers.update_health(
+        MARKET,
+        [
+            HealthCheck(a, Decimal("1.02"), Decimal(1000), Decimal(2000), False),
+            HealthCheck(b, Decimal("2.5"), Decimal(500), Decimal(3000), False),
+            HealthCheck(c, None, Decimal(0), Decimal(0), False),  # inactive
+        ],
+        Decimal(10),
+    )
+    opportunities = SqlOpportunityRepository(sessions)
+    opportunity_id = await opportunities.add(summary(detected_at=datetime.now(UTC)))
+    notifications = SqlNotificationRepository(sessions)
+    await notifications.record(opportunity_id, "telegram", "sent")
+    await notifications.record(opportunity_id, "telegram", "retrying")
+    await notifications.record(None, "telegram", "sent")  # system message: not an alert
+
+    repo = SqlStatusRepository(sessions)
+    stats = (await repo.market_stats(Decimal("1.05")))[MARKET.key]
+    assert stats.active_borrowers == 2
+    assert stats.total_debt_usd == Decimal(1500)
+    assert stats.at_risk == 1
+    assert stats.min_health_factor == Decimal("1.02")
+
+    activity = await repo.activity_since(datetime.now(UTC) - timedelta(hours=1))
+    assert activity.opportunities == 1
+    assert activity.best_net_profit_usd == summary().net_profit_usd
+    assert (activity.alerts_sent, activity.alerts_failed) == (1, 0)
+    future = await repo.activity_since(datetime.now(UTC) + timedelta(hours=1))
+    assert future.opportunities == 0 and future.best_net_profit_usd is None

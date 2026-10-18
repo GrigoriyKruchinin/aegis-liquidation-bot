@@ -11,6 +11,7 @@ from aegis.core.models import OpportunitySummary
 
 NOTIFY_OPPORTUNITY_TASK = "aegis.notify.opportunity"
 NOTIFY_SYSTEM_TASK = "aegis.notify.system"
+NOTIFY_STATUS_TASK = "aegis.notify.status"
 
 
 class CeleryNotificationDispatcher:

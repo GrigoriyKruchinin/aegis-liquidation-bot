@@ -119,3 +119,10 @@ async def test_l1_fee_zero_on_generic_evm() -> None:
 
 async def _no_sleep(_: float) -> None:
     return None
+
+
+def test_clients_have_no_request_issuing_middleware() -> None:
+    provider = EvmChainProvider(BASE, [SecretStr("https://rpc.example/v2/KEY")])
+    names = {name for _mw, name in provider._clients[0].middleware_onion.middleware}
+    assert "validation" not in names  # would add 2x eth_chainId per eth_call
+    assert not names & {"ens_name_to_address", "gas_price_strategy", "gas_estimate"}

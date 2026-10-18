@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, TypeVar, cast
 
@@ -79,6 +80,23 @@ def _to_log_entry(log: LogReceipt) -> LogEntry:
     )
 
 
+# Default web3 middleware that only matters when *sending* transactions or resolving ENS names.
+# `validation` alone issues two extra `eth_chainId` requests per `eth_call` (3 round trips instead
+# of 1), which triples latency and RPC usage on the hot path.
+_UNNEEDED_MIDDLEWARE = ("validation", "ens_name_to_address", "gas_price_strategy", "gas_estimate")
+
+
+def _make_client(url: SecretStr) -> Client:
+    """Lean read-only AsyncWeb3 client: one HTTP request per RPC call."""
+    client = AsyncWeb3(
+        AsyncHTTPProvider(url.get_secret_value(), exception_retry_configuration=None)
+    )
+    for name in _UNNEEDED_MIDDLEWARE:
+        with contextlib.suppress(ValueError, KeyError):
+            client.middleware_onion.remove(name)
+    return client
+
+
 class EvmChainProvider(BaseChainProvider):
     """Read-only provider for any EVM chain without an L1 data fee.
 
@@ -104,10 +122,7 @@ class EvmChainProvider(BaseChainProvider):
         super().__init__(config)
         if not rpc_urls:
             raise ConfigurationError(f"no RPC URLs configured for chain '{config.name}'")
-        self._clients: list[Client] = [
-            AsyncWeb3(AsyncHTTPProvider(url.get_secret_value(), exception_retry_configuration=None))
-            for url in rpc_urls
-        ]
+        self._clients: list[Client] = [_make_client(url) for url in rpc_urls]
         self._timeout = timeout_seconds
         self._attempts = max_retries + 1
         self._semaphore = asyncio.Semaphore(max_concurrency)

@@ -269,3 +269,48 @@ class OpportunitySummary:
             notes=quote.notes,
             id=opportunity.id,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class MarketStats:
+    """Aggregated borrower snapshot of one market."""
+
+    active_borrowers: int
+    total_debt_usd: Decimal
+    at_risk: int
+    min_health_factor: Decimal | None
+
+
+@dataclass(frozen=True, slots=True)
+class MarketStatus:
+    """One row of the periodic status report.
+
+    Attributes:
+        index_lag_seconds: How far the indexer is behind the chain head (`None` = not started).
+    """
+
+    chain: str
+    market_name: str
+    stats: MarketStats
+    index_lag_seconds: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class ActivityStats:
+    """Opportunities and alerts within the report period."""
+
+    opportunities: int
+    best_net_profit_usd: Decimal | None
+    alerts_sent: int
+    alerts_failed: int
+
+
+@dataclass(frozen=True, slots=True)
+class StatusReport:
+    """Periodic "bot is alive" summary."""
+
+    generated_at: datetime
+    period_hours: int
+    markets: tuple[MarketStatus, ...]
+    activity: ActivityStats
+    last_scan_age_seconds: int | None

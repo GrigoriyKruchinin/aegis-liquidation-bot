@@ -28,6 +28,7 @@ from aegis.db.repositories import (
     SqlCheckpointRepository,
     SqlNotificationRepository,
     SqlOpportunityRepository,
+    SqlStatusRepository,
 )
 from aegis.db.session import create_engine, create_session_factory
 from aegis.estimator.gas import L2GasEstimator
@@ -35,10 +36,15 @@ from aegis.estimator.oracle import ChainlinkNativePriceOracle
 from aegis.estimator.profit import ProfitEstimator
 from aegis.notifier.telegram import TelegramNotifier
 from aegis.protocols import PROTOCOLS, ProtocolDeps
+from aegis.reporting.status import StatusReporter
 from aegis.scanner.health import HealthFactorScanner
 from aegis.scanner.indexer import EventBorrowerIndexer
 from aegis.scanner.orchestrator import ScanOrchestrator
-from aegis.workers.redis_tools import RedisAlertDeduplicator, RedisTaskLock
+from aegis.workers.redis_tools import (
+    RedisAlertDeduplicator,
+    RedisTaskLock,
+    heartbeat_age_seconds,
+)
 
 DispatcherFactory = Callable[[], INotificationDispatcher]
 
@@ -96,6 +102,7 @@ class Container:
     notifications: SqlNotificationRepository
     locks: RedisTaskLock
     deduplicator: RedisAlertDeduplicator
+    status_reporter: StatusReporter
     closed: bool = field(default=False)
 
     @classmethod
@@ -156,6 +163,13 @@ class Container:
             notifications=SqlNotificationRepository(sessions),
             locks=RedisTaskLock(redis),
             deduplicator=deduplicator,
+            status_reporter=StatusReporter(
+                markets,
+                SqlStatusRepository(sessions),
+                checkpoints,
+                lambda: heartbeat_age_seconds(redis),
+                hf_threshold=settings.watchlist_hf_threshold,
+            ),
         )
 
     def market_names(self) -> dict[str, list[str]]:

@@ -95,19 +95,31 @@ class ScanOrchestrator:
     async def scan_chain(self, chain: str, mode: ScanMode) -> list[ScanResult]:
         """Scan all markets of `chain` (`full` = all active borrowers, `watchlist` = low HF)."""
 
-        async def scan_market(protocol: BaseLendingProtocol) -> ScanResult:
-            if mode == "full":
-                borrowers = await self._borrowers.list_active(protocol.market)
-            else:
-                borrowers = await self._borrowers.list_watchlist(
-                    protocol.market, self._watchlist_hf
-                )
-            result = await self._scanner.scan(protocol, borrowers)
-            for opportunity in result.opportunities:
-                await self._handle(OpportunitySummary.from_opportunity(opportunity))
-            return result
+        async def scan(protocol: BaseLendingProtocol) -> ScanResult:
+            return await self.scan_market(protocol, mode)
 
-        return await self._for_each_market(chain, f"scan_{mode}", scan_market)
+        return await self._for_each_market(chain, f"scan_{mode}", scan)
+
+    async def watchlist(self, protocol: BaseLendingProtocol) -> list[str]:
+        """Borrowers of a market whose last known HF is below the watchlist threshold."""
+        return await self._borrowers.list_watchlist(protocol.market, self._watchlist_hf)
+
+    async def scan_market(self, protocol: BaseLendingProtocol, mode: ScanMode) -> ScanResult:
+        """Scan one market (`full` = all active borrowers, `watchlist` = low HF)."""
+        if mode == "full":
+            borrowers = await self._borrowers.list_active(protocol.market)
+        else:
+            borrowers = await self.watchlist(protocol)
+        return await self.scan_borrowers(protocol, borrowers)
+
+    async def scan_borrowers(
+        self, protocol: BaseLendingProtocol, borrowers: Sequence[str]
+    ) -> ScanResult:
+        """Scan an explicit borrower set and dispatch alerts for profitable opportunities."""
+        result = await self._scanner.scan(protocol, borrowers)
+        for opportunity in result.opportunities:
+            await self._handle(OpportunitySummary.from_opportunity(opportunity))
+        return result
 
     async def _handle(self, summary: OpportunitySummary) -> None:
         log = logger.bind(

@@ -20,6 +20,7 @@ from aegis.core.models import (
     WAD,
     Asset,
     Call,
+    CallResult,
     CollateralLeg,
     DebtLeg,
     HealthCheck,
@@ -526,6 +527,19 @@ class AaveV3Protocol(BaseLendingProtocol):
                     )
                 )
         return quotes
+
+    def price_calls(self) -> list[Call]:
+        """One `getAssetsPrices` call covering every reserve."""
+        if self._oracle is None or not self._reserves:
+            return []
+        return [
+            Call(self._oracle, GET_ASSETS_PRICES.encode([r.asset.address for r in self._reserves]))
+        ]
+
+    def parse_prices(self, results: Sequence[CallResult]) -> tuple[int, ...]:
+        """Raw oracle prices in base-currency units, in reserve order."""
+        decoded = decode_result(GET_ASSETS_PRICES, results[0]) if results else None
+        return tuple(int(p) for p in decoded[0]) if decoded else ()
 
 
 @PROTOCOLS.register(PROTOCOL_NAME)

@@ -1,6 +1,6 @@
 # Aegis Liquidations — local V1 stack (read-only detector).
 # Start order: postgres + redis (healthy) -> migrate (completed) -> scanner + notifier (healthy)
-#              -> celery-beat (healthy once scans heartbeat).
+#              -> watcher + celery-beat (healthy once they heartbeat).
 # Least privilege: only the two workers receive the full `.env` (Telegram token, RPC keys).
 # postgres / migrate / celery-beat get just the variables they need via interpolation.
 name: aegis-local
@@ -125,6 +125,27 @@ services:
       retries: 3
       start_period: 30s
 
+  watcher:
+    # Per-block hot-set re-checks and price-move triggered rescans (low-latency detection).
+    <<: *app
+    command: ["python", "-m", "aegis.workers.watcher"]
+    env_file: .env
+    environment:
+      <<: *common-env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      notifier-worker:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-m", "aegis.workers.healthcheck", "heartbeat", "--name", "watcher", "--max-age", "60"]
+      interval: 15s
+      timeout: 10s
+      retries: 4
+      start_period: 60s
+
   celery-beat:
     <<: *app
     command:
@@ -139,7 +160,7 @@ services:
       ENABLED_CHAINS: ${ENABLED_CHAINS:-base,arbitrum,optimism}
       INDEX_INTERVAL_SECONDS: ${INDEX_INTERVAL_SECONDS:-60}
       SCAN_INTERVAL_SECONDS: ${SCAN_INTERVAL_SECONDS:-30}
-      WATCHLIST_INTERVAL_SECONDS: ${WATCHLIST_INTERVAL_SECONDS:-6}
+      STATUS_REPORT_INTERVAL_HOURS: ${STATUS_REPORT_INTERVAL_HOURS:-1}
     depends_on:
       scanner:
         condition: service_healthy

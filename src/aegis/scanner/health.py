@@ -87,7 +87,8 @@ class HealthFactorScanner:
                 opportunities.append(
                     LiquidationOpportunity(position, estimate, detected_at=datetime.now(UTC))
                 )
-        logger.info(
+        log = logger.info if targets else logger.debug  # per-block watcher scans stay quiet
+        log(
             "scan_completed",
             market=market.key,
             checked=len(checks),
