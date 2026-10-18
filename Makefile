@@ -21,7 +21,8 @@ typecheck:
 test:
 	uv run pytest $(ARGS)
 
-# Needs anvil (Foundry) and a migrated PostgreSQL (POSTGRES_* env); FORK_URL_OPTIMISM optional.
+# Needs anvil (Foundry) and PostgreSQL on 127.0.0.1:5433 (`make up-local`); tests use an isolated
+# `<POSTGRES_DB>_test` database. Override with TEST_POSTGRES_HOST/PORT, FORK_URL_OPTIMISM.
 test-integration:
 	RUN_INTEGRATION=1 uv run pytest tests/integration $(ARGS)
 

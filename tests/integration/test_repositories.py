@@ -1,18 +1,16 @@
 """Repository tests against a real PostgreSQL (migrated schema).
 
-Run with: RUN_INTEGRATION=1 POSTGRES_HOST=... POSTGRES_PORT=... make test ARGS=tests/integration
+Uses the isolated ``<POSTGRES_DB>_test`` database from `tests/integration/conftest.py`.
+Run with `make up-local` (Postgres on 127.0.0.1:5433) and then `make test-integration`.
 """
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from aegis.config.settings import AppSettings
 from aegis.core.models import HealthCheck
 from aegis.db.repositories import (
     SqlBorrowerRepository,
@@ -20,21 +18,9 @@ from aegis.db.repositories import (
     SqlNotificationRepository,
     SqlOpportunityRepository,
 )
-from aegis.db.session import create_engine, create_session_factory
 from tests.factories import MARKET, summary
 
 pytestmark = pytest.mark.integration
-
-
-@pytest.fixture
-async def sessions() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = create_engine(AppSettings().database_url)
-    async with engine.begin() as conn:
-        await conn.execute(
-            text("TRUNCATE notifications, opportunities, borrowers, indexer_checkpoints CASCADE")
-        )
-    yield create_session_factory(engine)
-    await engine.dispose()
 
 
 async def test_borrower_lifecycle(sessions: async_sessionmaker[AsyncSession]) -> None:

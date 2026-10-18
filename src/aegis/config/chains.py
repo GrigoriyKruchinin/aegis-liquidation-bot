@@ -1,7 +1,21 @@
 """Static per-chain configuration and protocol deployment registry.
 
-Addresses here are public mainnet deployments. Aave v3 sub-contracts (Pool, Oracle) are
-resolved at runtime through the `PoolAddressesProvider`, so only the provider is pinned.
+Every ``0x...`` value below is the public address of a smart contract already deployed on that
+network (not a secret, not a hash). Contracts never move, and the ones listed here are
+upgradeable proxies, so their addresses stay valid when the protocol upgrades its logic. What
+can change over time is the *set* of markets (new Comet markets launch, old ones get deprecated).
+
+Sources (all verified on-chain on 2026-10-18 with `getPool()`, `baseToken()`, `description()`):
+
+- Multicall3 — same address on every EVM chain: https://www.multicall3.com
+- Wrapped native (WETH) — OP-stack predeploy ``0x4200…0006`` (Base, Optimism) and Arbitrum WETH:
+  https://docs.optimism.io/stack/smart-contracts#l2-contract-addresses
+- Chainlink ETH/USD aggregator proxies: https://data.chain.link (network -> ETH / USD)
+- Aave v3 ``PoolAddressesProvider`` — Aave address book:
+  https://github.com/bgd-labs/aave-address-book . Pool and Oracle are resolved at runtime
+  through it, so only the provider is pinned.
+- Compound v3 (Comet) market proxies — Compound deployments:
+  https://github.com/compound-finance/comet/tree/main/deployments (``roots.json`` per network)
 """
 
 from __future__ import annotations

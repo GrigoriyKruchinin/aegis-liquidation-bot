@@ -87,9 +87,11 @@ make install       # uv sync --all-groups
 make check         # ruff format check + ruff lint + mypy --strict + pytest
 make test ARGS="tests/unit/test_aave_v3.py -k close_factor"
 
-# Integration tests: repositories on a migrated PostgreSQL + an anvil fork of Optimism
+# Integration tests: repositories + an anvil fork of Optimism
 # (Foundry: `curl -L https://foundry.paradigm.xyz | bash && foundryup`).
-POSTGRES_HOST=localhost POSTGRES_PORT=5433 make test-integration
+# DB tests use an isolated `<POSTGRES_DB>_test` database on 127.0.0.1:5433 (`make up-local`),
+# never the bot's own data; they are skipped if PostgreSQL is unreachable.
+make test-integration
 FORK_URL_OPTIMISM=https://opt-mainnet.g.alchemy.com/v2/<key> make test-integration ARGS=-k anvil
 ```
 
