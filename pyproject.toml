@@ -84,3 +84,8 @@ markers = [
     "integration: tests that hit a forked chain (anvil); run with RUN_INTEGRATION=1",
 ]
 addopts = "-ra --strict-markers"
+filterwarnings = [
+    # web3's AsyncHTTPProvider passes enable_cleanup_closed=True to aiohttp, which is a no-op
+    # (and warns) on Python >= 3.12.7. Harmless third-party noise; remove once web3 drops it.
+    "ignore:enable_cleanup_closed ignored:DeprecationWarning:aiohttp.connector",
+]
