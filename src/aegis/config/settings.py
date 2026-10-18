@@ -115,7 +115,7 @@ class AppSettings(DatabaseSettings, SchedulerSettings):
     #: Shared throughput budget per RPC provider key, in compute units/s across ALL chains and
     #: processes (Alchemy limits CUPS per app). 0 disables client-side rate limiting.
     rpc_cu_per_second: int = Field(default=300, ge=0)
-    #: Share of the budget reserved for the latency-critical watcher (indexer/scans use the rest).
+    #: Share of the budget dedicated to the watcher; background work gets the rest (disjoint).
     rpc_reserve_pct: int = Field(default=30, ge=0, le=90)
 
     # --- Scanning ----------------------------------------------------------------------------

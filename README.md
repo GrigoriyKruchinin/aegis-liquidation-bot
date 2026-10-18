@@ -281,7 +281,7 @@ All settings come from environment variables or `.env`. See [`.env.example`](.en
 | `MARKET_ENABLED` / `MARKET_LOOKBACK_DAYS` | `true` / `30` | Competitor-analysis indexing and its first-run backfill window |
 | `MARKET_INDEX_INTERVAL_SECONDS` / `MARKET_ENRICH_INTERVAL_SECONDS` | `300` / `120` | How often new liquidations are indexed and enriched |
 | `MARKET_LAG_WINDOW_MINUTES` | `120` | How far back the archive search looks for the start of a liquidatable window |
-| `RPC_RESERVE_PCT` | `30` | Share of the budget reserved for the watcher. The indexer and scheduled scans use the rest, so a backfill never slows down detection |
+| `RPC_RESERVE_PCT` | `30` | Share of the budget dedicated to the watcher. Background work (indexers, scans, market enrichment) gets the rest. The two shares are separate buckets, so neither side can starve the other |
 | `POSTGRES_*`, `REDIS_URL` | local defaults | Overridden by docker-compose for containers |
 
 ## Security notes

@@ -51,32 +51,57 @@ def _limiter(redis: object, sleeps: list[float], **kwargs: object) -> RedisRateL
     return RedisRateLimiter(redis, 100, 30, sleep=fake_sleep, **kwargs)  # type: ignore[arg-type]
 
 
-async def test_limiter_keeps_reserve_for_high_priority(sleeps: list[float]) -> None:
-    limiter = _limiter(fakeredis.FakeAsyncRedis(), sleeps)
-    # Low priority may spend down to the 30-unit reserve without waiting...
-    for _ in range(7):
-        await limiter.acquire("b", 10, high_priority=False)
-    assert sleeps == []
-    # ...and the high-priority watcher can still spend the reserve immediately.
+async def test_shares_are_independent_no_starvation(sleeps: list[float]) -> None:
+    redis = fakeredis.FakeAsyncRedis()
+    limiter = _limiter(redis, sleeps)  # 100 CU/s: high 30, low 70; each holds >= 75 CU
+    # A busy watcher drains its own share completely...
     for _ in range(3):
-        await limiter.acquire("b", 10, high_priority=True)
+        await limiter.acquire("b", 25, high_priority=True)
+    # ...and background work is not affected (this was a starvation bug before).
+    for _ in range(3):
+        await limiter.acquire("b", 25, high_priority=False)
     assert sleeps == []
+    assert await redis.exists("aegis:rpc:budget:b:high", "aegis:rpc:budget:b:low") == 2
 
 
-async def test_limiter_makes_low_priority_wait() -> None:
+async def test_limiter_makes_caller_wait_when_its_share_is_spent() -> None:
     redis = fakeredis.FakeAsyncRedis()
     waited: list[float] = []
 
     async def sleep_and_refill(seconds: float) -> None:
         waited.append(seconds)
-        await redis.delete("aegis:rpc:budget:b")  # the bucket refills while we wait
+        await redis.delete("aegis:rpc:budget:b:low")  # the bucket refills while we wait
 
     limiter = RedisRateLimiter(redis, 100, 30, sleep=sleep_and_refill)
-    for _ in range(7):
-        await limiter.acquire("b", 10, high_priority=False)
+    for _ in range(3):  # 75 CU capacity
+        await limiter.acquire("b", 25, high_priority=False)
     assert waited == []
-    await limiter.acquire("b", 10, high_priority=False)  # would dip into the reserve -> wait
+    await limiter.acquire("b", 25, high_priority=False)
     assert len(waited) == 1 and 0 < waited[0] <= 1.0
+
+
+async def test_small_budgets_charge_the_full_call_cost() -> None:
+    redis = fakeredis.FakeAsyncRedis()
+    waited: list[float] = []
+
+    async def record(seconds: float) -> None:
+        waited.append(seconds)
+        await redis.delete("aegis:rpc:budget:b:low")
+
+    limiter = RedisRateLimiter(redis, 10, 30, sleep=record)  # low share = 7 CU/s
+    for _ in range(2):  # 75-CU capacity: two 26-CU eth_calls fit, the third must wait
+        await limiter.acquire("b", 26, high_priority=False)
+    assert waited == []
+    await limiter.acquire("b", 26, high_priority=False)
+    assert waited  # charged 26, not min(26, 7)
+
+
+async def test_zero_reserve_uses_one_shared_bucket(sleeps: list[float]) -> None:
+    redis = fakeredis.FakeAsyncRedis()
+    limiter = RedisRateLimiter(redis, 100, 0)
+    await limiter.acquire("b", 10, high_priority=True)
+    await limiter.acquire("b", 10, high_priority=False)
+    assert await redis.exists("aegis:rpc:budget:b") == 1
 
 
 async def test_limiter_fails_open_and_bypasses_when_redis_is_down(sleeps: list[float]) -> None:

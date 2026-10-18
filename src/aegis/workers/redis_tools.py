@@ -97,23 +97,23 @@ async def mark_sent(redis: Redis, opportunity_id: int) -> None:
     await redis.set(_sent_key(opportunity_id), "1", ex=SENT_MARKER_TTL_SECONDS)
 
 
-# Token bucket refilled continuously at `rate` units/s, capacity = `rate` (1 s burst).
+# Token bucket refilled continuously at `rate` units/s up to `capacity`.
 # Returns "0" when the cost was granted, otherwise the seconds to wait before retrying.
 _BUCKET_SCRIPT = """
 local rate = tonumber(ARGV[1])
 local cost = tonumber(ARGV[2])
-local reserve = tonumber(ARGV[3])
+local capacity = tonumber(ARGV[3])
 local t = redis.call('TIME')
 local now = tonumber(t[1]) + tonumber(t[2]) / 1000000
 local data = redis.call('HMGET', KEYS[1], 'tokens', 'ts')
-local tokens = tonumber(data[1]) or rate
+local tokens = tonumber(data[1]) or capacity
 local ts = tonumber(data[2]) or now
-tokens = math.min(rate, tokens + (now - ts) * rate)
+tokens = math.min(capacity, tokens + (now - ts) * rate)
 local wait = 0
-if tokens - cost >= reserve then
+if tokens >= cost then
     tokens = tokens - cost
 else
-    wait = (cost + reserve - tokens) / rate
+    wait = (cost - tokens) / rate
 end
 redis.call('HSET', KEYS[1], 'tokens', tostring(tokens), 'ts', tostring(now))
 redis.call('PEXPIRE', KEYS[1], 60000)
@@ -121,10 +121,17 @@ return tostring(wait)
 """
 
 MAX_LIMITER_SLEEP_SECONDS = 1.0
+#: Largest single-call cost (eth_getLogs); a bucket always holds at least one such call.
+MAX_SINGLE_CALL_COST = 75
 
 
 class RedisRateLimiter:
-    """`IRateLimiter`: compute-unit token bucket in Redis, shared by every process.
+    """`IRateLimiter`: compute-unit token buckets in Redis, shared by every process.
+
+    The budget is split into two independent buckets so neither side can starve the other:
+    high-priority callers (the watcher) get `reserve_pct` of it, background work (indexers,
+    scheduled scans, market enrichment) gets the rest. Each bucket can hold at least one call
+    of the most expensive method, so every call is charged its full cost.
 
     The limiter must never become a single point of failure: each Redis call is bounded by
     `redis_timeout_seconds`, and after a failure the limiter is bypassed (fails open) for
@@ -132,8 +139,8 @@ class RedisRateLimiter:
 
     Args:
         redis: Redis client.
-        units_per_second: Budget per bucket (e.g. ~80% of the provider's CUPS limit).
-        reserve_pct: Share of the budget only high-priority callers may consume.
+        units_per_second: Total budget per provider key (e.g. ~80% of the plan's CUPS).
+        reserve_pct: Share of the budget dedicated to high-priority callers.
         sleep: Injectable sleep (tests).
         clock: Injectable monotonic clock (tests).
     """
@@ -150,8 +157,14 @@ class RedisRateLimiter:
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._redis = redis
-        self._rate = units_per_second
-        self._reserve = units_per_second * reserve_pct / 100
+        high = units_per_second * reserve_pct / 100
+        # 0% reserve: everyone shares one bucket; otherwise two disjoint shares.
+        self._rates = (
+            {"high": float(units_per_second), "low": float(units_per_second)}
+            if reserve_pct == 0
+            else {"high": max(0.1, high), "low": max(0.1, units_per_second - high)}
+        )
+        self._shared = reserve_pct == 0
         self._timeout = redis_timeout_seconds
         self._bypass_seconds = bypass_seconds
         self._sleep = sleep
@@ -159,21 +172,18 @@ class RedisRateLimiter:
         self._bypass_until = float("-inf")
 
     async def acquire(self, bucket: str, cost: int, *, high_priority: bool) -> None:
-        """Block until the budget allows `cost`. Fails open if Redis is unavailable."""
-        reserve = 0.0 if high_priority else self._reserve
-        cost = min(cost, self._rate)  # a single call larger than the bucket must still pass
+        """Block until this caller's share allows `cost`. Fails open if Redis is unavailable."""
+        share = "high" if high_priority else "low"
+        rate = self._rates[share]
+        capacity = max(rate, float(MAX_SINGLE_CALL_COST), float(cost))
+        key = f"aegis:rpc:budget:{bucket}" + ("" if self._shared else f":{share}")
         while True:
             if self._clock() < self._bypass_until:
                 return
             try:
                 async with asyncio.timeout(self._timeout):
                     raw = await self._redis.eval(  # type: ignore[misc]
-                        _BUCKET_SCRIPT,
-                        1,
-                        f"aegis:rpc:budget:{bucket}",
-                        str(self._rate),
-                        str(cost),
-                        str(reserve),
+                        _BUCKET_SCRIPT, 1, key, str(rate), str(cost), str(capacity)
                     )
             except (RedisError, OSError, TimeoutError):
                 self._bypass_until = self._clock() + self._bypass_seconds
