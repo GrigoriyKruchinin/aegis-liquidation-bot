@@ -1,14 +1,130 @@
+<div align="center">
+
+<img src="docs/assets/aegis-logo.jpg" alt="Aegis Liquidations logo" width="180">
+
 # Aegis Liquidations
 
-Multi-chain liquidation bot platform for EVM L2 networks. Strictly typed, async, SOLID and fully dockerized.
+**A multi-chain liquidation bot platform for EVM Layer-2 networks.**
+
+It watches lending protocols on Base, Arbitrum and Optimism, finds under-collateralised loans as
+soon as they can be liquidated, prices the opportunity after gas, and alerts you on Telegram.
+
+![Python](https://img.shields.io/badge/python-3.12-3776AB?logo=python&logoColor=white)
+![mypy](https://img.shields.io/badge/mypy-strict-2A6DB2)
+![ruff](https://img.shields.io/badge/lint-ruff-D7FF64)
+![Docker](https://img.shields.io/badge/docker-compose-2496ED?logo=docker&logoColor=white)
+![Status](https://img.shields.io/badge/V1-read--only%20detector-success)
+
+</div>
+
+---
+
+## What is this?
+
+Lending protocols such as **Aave** and **Compound** let users borrow against collateral. Every
+position has a **health factor (HF)**: the risk-adjusted value of the collateral divided by the
+debt. When prices move and the HF drops **below 1**, anyone may *liquidate* the position. The
+liquidator repays part of the debt and receives the borrower's collateral at a discount: the
+**liquidation bonus**, typically 1–10%. This keeps the protocol solvent, and the liquidator keeps
+the spread.
+
+Liquidations are a race. A position becomes liquidatable in a specific block, and many bots
+compete for it. **Aegis** is built to win that race on L2s. Its job breaks into four steps:
+
+1. **Know every borrower.** It indexes protocol events and keeps a local database of all accounts
+   with debt.
+2. **Notice risk early.** Positions close to liquidation are re-checked on every block, and an
+   oracle price move triggers an immediate rescan of the whole market.
+3. **Price it honestly.** It computes the real liquidation terms of each protocol (close factor,
+   eMode bonus, protocol fee, dust rules) and subtracts gas, including the L1 data fee that L2s
+   charge.
+4. **Act.** In **V1** "act" means a rich Telegram alert. From **V2** the bot will execute the
+   liquidation itself through its own smart contract, with flash loans.
+
+> **Current status: V1 — read-only detector.** It holds no private keys and never sends a
+> transaction. It is safe to run on your laptop and shows what Aegis sees.
+
+## Features
+
+| | |
+|---|---|
+| 🌐 **Multi-chain** | Base, Arbitrum One and Optimism, one async provider per chain with RPC fallbacks |
+| 🏦 **Protocols** | Aave v3 (including eMode and the v3.3 close-factor and dust rules) and Compound v3 / Comet (absorb + `buyCollateral`) |
+| ⚡ **Low-latency watcher** | Synchronised with block production. Re-checks near-liquidation positions every block and starts a full rescan on any oracle move of 0.5% or more |
+| 💰 **Accurate profit** | Liquidation bonus minus gas. Gas covers L2 execution plus the L1 data fee (OP-stack `GasPriceOracle`, Arbitrum `NodeInterface`) and is priced in USD with Chainlink. All money math uses `int` wei and `Decimal`, never `float` |
+| 🔎 **Borrower indexer** | Checkpointed `eth_getLogs` indexing with adaptive chunk sizes and reorg safety |
+| 📦 **Batched reads** | Multicall3 everywhere: thousands of positions checked in a few RPC calls |
+| 🚦 **RPC budget** | A Redis token bucket shared by all services keeps usage under the provider's compute-unit limit, with a reserved share for the watcher |
+| 📨 **Telegram** | HTML alerts for every opportunity, a startup message and an hourly status report |
+| 🐳 **Dockerized** | One `make up-local`: Postgres, Redis, migrations, Celery workers, the watcher and beat, with healthchecks and a strict start order |
+| 🧱 **Clean architecture** | SOLID with strategy-pattern adapters. A new chain or protocol is a new class plus a registry entry. Fully typed (`mypy --strict`) and tested |
+
+## Supported markets (V1)
+
+| Network | Aave v3 | Compound v3 (Comet) |
+|---|---|---|
+| **Base** | ✅ | cUSDCv3, cWETHv3 |
+| **Arbitrum One** | ✅ | cUSDCv3, cUSDC.ev3, cUSDTv3, cWETHv3 |
+| **Optimism** | ✅ | cUSDCv3, cUSDTv3, cWETHv3 |
+
+Contract addresses and their sources are documented in
+[`src/aegis/config/chains.py`](src/aegis/config/chains.py). Each one was verified on-chain.
+
+## What you get in Telegram
+
+<table>
+<tr>
+<td width="50%" valign="top">
+
+**🚨 Liquidation opportunity**
+```
+🚨 Liquidation Opportunity
+━━━━━━━━━━━━━━━━━━
+🌐 Network: Base
+🏦 Protocol: Aave v3 · Aave v3
+👤 Borrower: 0x1111…1111
+🔴 Health Factor: 0.9712
+━━━━━━━━━━━━━━━━━━
+💳 Debt to cover: 1,000 USDC (≈ $1,000.00)
+💎 Collateral: WETH (seize ≈ $1,050.00)
+🎁 Liquidation bonus: 5.00%
+⛽ Gas (L2 + L1 data): $0.0312
+━━━━━━━━━━━━━━━━━━
+💰 Est. net profit: $44.97
+```
+
+</td>
+<td width="50%" valign="top">
+
+**📊 Hourly status report**
+```
+📊 Aegis status · last 1h
+━━━━━━━━━━━━━━━━━━
+🌐 Base
+  • Aave v3: 1840 borrowers · debt $212.4M
+    · ⚠️ 4 at risk · min HF 1.021 · ✅ synced
+🌐 Arbitrum One
+  • Aave v3: 5120 borrowers · debt $640.0M
+    · ⚠️ 11 at risk · ⏳ indexing, ~2h behind
+━━━━━━━━━━━━━━━━━━
+🔎 Opportunities: 0
+📨 Alerts sent: 0
+💓 Last scan: 4s ago
+```
+
+</td>
+</tr>
+</table>
+
+## Roadmap
 
 | Version | Scope | Status |
 |---|---|---|
-| **V1** | Read-only opportunity detector + Telegram alerts (Base, Arbitrum, Optimism · Aave v3, Compound v3) | ✅ implemented |
-| V2 | Smart contracts, flash loans, Dynamic Liquidity Router, on-chain execution, CI/CD | planned |
-| V3 | FastAPI admin dashboard, analytics, multi-chain plugins | planned |
+| **V1** | Read-only opportunity detector and Telegram alerts | ✅ done |
+| **V2** | `AegisLiquidator` smart contract; flash loans (Aave, Balancer, Equalizer) behind an `ALLOW_FLASH_LOANS` kill switch; a Dynamic Liquidity Router (self-fund → flash loan → skip); on-chain execution with simulation; competitive-latency work (Flashblocks, Timeboost, pre-signed txs); VPS deployment and CI/CD; daily and monthly reports | planned |
+| **V3** | FastAPI admin dashboard (auth, analytics, Chart.js); plugin system for more L2/L3 chains, DEX aggregators and lending protocols | planned |
 
-See [`todo.md`](todo.md) for the full roadmap.
+The detailed checklist is in [`todo.md`](todo.md).
 
 ## How V1 works
 
@@ -47,34 +163,18 @@ See [`todo.md`](todo.md) for the full roadmap.
    - **Gas:** protocol gas baseline × gas price (+20% margin) + L1 data fee. The L1 fee comes from the OP-stack `GasPriceOracle` on Base/Optimism and from `NodeInterface.gasEstimateL1Component` on Arbitrum. It is priced in USD with Chainlink ETH/USD.
 5. **Alert.** If net profit ≥ `MIN_PROFIT_USD`, the opportunity is stored and the alert is queued. Redis prevents a repeat alert for the same borrower within `ALERT_DEDUP_TTL_SECONDS`.
 
-V1 is strictly **read-only**: it loads no private keys and never sends a transaction.
+## Quickstart
 
-## Project layout
-
-```
-src/aegis/
-  config/      settings (pydantic-settings) and static chain/protocol registry
-  core/        domain models, interfaces, errors, ABI helpers, DI container
-  chains/      EvmChainProvider + OP-stack / Arbitrum L1 data fee providers
-  protocols/   Aave v3 and Compound v3 adapters (BaseLendingProtocol)
-  scanner/     event indexer, health-factor scanner, orchestrator
-  estimator/   Chainlink native price oracle, gas estimator, profit estimator
-  notifier/    Telegram notifier and HTML templates
-  workers/     Celery app, tasks, Redis tools, healthchecks
-  db/          SQLAlchemy models, repositories, session factory
-migrations/    Alembic
-tests/         unit (default) and integration (RUN_INTEGRATION=1)
-```
-
-## Local quickstart
-
-Requirements: Docker with Compose v2. For development, also [uv](https://docs.astral.sh/uv/).
+Requirements: Docker with Compose v2, an [Alchemy](https://dashboard.alchemy.com) key with Base,
+Arbitrum and OP Mainnet enabled, and a Telegram bot from [@BotFather](https://t.me/BotFather).
+For development you also need [uv](https://docs.astral.sh/uv/).
 
 ```bash
 cp .env.example .env      # fill TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, ALCHEMY_API_KEY, POSTGRES_PASSWORD
 make up-local             # build and start the stack
 make ps-local             # all services should become "healthy"
 make logs-local           # follow logs
+make rpc-latency          # optional: compare how fresh your RPC endpoints are
 make down-local
 ```
 
@@ -87,6 +187,29 @@ The services start in a strict order:
 When the scanner is ready, it posts **🟢 Aegis scanner online** to Telegram. Every `STATUS_REPORT_INTERVAL_HOURS` it also posts a **📊 Aegis status** report. The report shows tracked borrowers and their debt, positions close to liquidation, indexer progress, and the opportunities and alerts of the period, so you can tell the bot is alive even when no liquidations occur.
 
 On the first run the indexer backfills `INDEXER_LOOKBACK_DAYS` of events. This takes from a few minutes to about an hour, depending on the RPC plan. Progress shows up in the `index_synced` log lines.
+
+> Profitable liquidations are rare in calm markets. A quiet Telegram does not mean the bot is
+> idle. Check the hourly status report.
+
+## Project layout
+
+```
+src/aegis/
+  config/      settings (pydantic-settings) and the static chain / protocol registry
+  core/        domain models, interfaces, errors, ABI helpers, DI container
+  chains/      EvmChainProvider, OP-stack / Arbitrum L1-fee providers, RPC cost accounting
+  protocols/   Aave v3 and Compound v3 adapters (BaseLendingProtocol)
+  scanner/     event indexer, health-factor scanner, orchestrator, block-synchronous watcher
+  estimator/   Chainlink native price oracle, gas estimator, profit estimator
+  notifier/    Telegram notifier and HTML templates
+  reporting/   periodic status report
+  workers/     Celery app and tasks, watcher service, Redis tools, healthchecks
+  db/          SQLAlchemy models, repositories, session factory
+  tools/       operational CLIs (rpc_latency)
+migrations/    Alembic
+docs/assets/   images used by the documentation
+tests/         unit (default) and integration (RUN_INTEGRATION=1)
+```
 
 ## Development
 
@@ -139,4 +262,11 @@ All settings come from environment variables or `.env`. See [`.env.example`](.en
 - Secrets are `SecretStr` values. RPC URLs and bot tokens are redacted from all logs and errors.
 - `.env` is git-ignored. `.env.example` holds placeholders only.
 - Containers run as a non-root user. Postgres is published only on `127.0.0.1:5433`.
-- Least privilege in compose: only `scanner` and `notifier-worker` receive the full `.env`. `postgres`, `migrate` and `celery-beat` get only the variables they need (`DatabaseSettings` / `SchedulerSettings`).
+- Least privilege in compose: only `scanner`, `notifier-worker` and `watcher` receive the full `.env`. `postgres`, `migrate` and `celery-beat` get only the variables they need (`DatabaseSettings` / `SchedulerSettings`).
+- V1 never loads a private key. V2 adds execution behind a hard `ALLOW_FLASH_LOANS` toggle, with mandatory `eth_call` simulation before every transaction.
+
+## Disclaimer
+
+This software is provided for research and educational purposes. It is not financial advice.
+Profit estimates are approximations, and on-chain execution (V2) carries real risk of loss. Use
+at your own risk.
