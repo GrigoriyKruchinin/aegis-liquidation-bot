@@ -20,6 +20,7 @@ from web3.exceptions import (
 from web3.types import FilterParams, LogReceipt, TopicFilter, TxParams
 
 from aegis.chains.multicall import chunked, decode_aggregate3, encode_aggregate3
+from aegis.chains.ratelimit import NoopRateLimiter, bucket_key, method_cost
 from aegis.config.chains import ChainConfig
 from aegis.core.abi import checksum
 from aegis.core.errors import (
@@ -28,7 +29,7 @@ from aegis.core.errors import (
     LogRangeTooLargeError,
     RpcError,
 )
-from aegis.core.interfaces import BaseChainProvider, BlockId
+from aegis.core.interfaces import BaseChainProvider, BlockId, IRateLimiter
 from aegis.core.logging import get_logger
 from aegis.core.models import Call, CallResult, LogEntry, LogFilter, TxTemplate
 from aegis.core.redact import redact, safe_error
@@ -48,6 +49,7 @@ _TRANSIENT_ERRORS: tuple[type[BaseException], ...] = (
 _FAILOVER_ERRORS: tuple[type[BaseException], ...] = (TimeoutError, *_TRANSIENT_ERRORS)
 
 _LOG_RANGE_HTTP_STATUSES = frozenset({400, 413})
+RATE_LIMIT_MAX_DELAY_SECONDS = 10.0
 
 _LOG_RANGE_HINTS = (
     "block range",
@@ -62,6 +64,17 @@ _LOG_RANGE_HINTS = (
 )
 
 logger = get_logger("chains.evm")
+
+
+def _rate_limit_delay(exc: BaseException, attempt: int) -> float | None:
+    """Back off properly on HTTP 429: honour `Retry-After`, else 1 s, 2 s, 4 s (max 10 s)."""
+    if not isinstance(exc, aiohttp.ClientResponseError) or exc.status != 429:
+        return None
+    header = exc.headers.get("Retry-After") if exc.headers else None
+    if header is not None:
+        with contextlib.suppress(ValueError):
+            return min(RATE_LIMIT_MAX_DELAY_SECONDS, max(0.0, float(header)))
+    return min(RATE_LIMIT_MAX_DELAY_SECONDS, float(2**attempt))
 
 
 def _is_log_range_error(exc: Exception) -> bool:
@@ -107,6 +120,9 @@ class EvmChainProvider(BaseChainProvider):
         max_retries: Retries per endpoint for transient errors.
         max_concurrency: Max in-flight RPC requests for this chain.
         multicall_batch_size: Max calls per `aggregate3` request.
+        rate_limiter: Shared compute-unit budget (see `aegis.chains.ratelimit`).
+        high_priority: True for latency-critical callers (the watcher), which may use the
+            budget reserve that background work (indexer, scheduled scans) must leave free.
     """
 
     def __init__(
@@ -118,11 +134,16 @@ class EvmChainProvider(BaseChainProvider):
         max_retries: int = 3,
         max_concurrency: int = 8,
         multicall_batch_size: int = 150,
+        rate_limiter: IRateLimiter | None = None,
+        high_priority: bool = False,
     ) -> None:
         super().__init__(config)
         if not rpc_urls:
             raise ConfigurationError(f"no RPC URLs configured for chain '{config.name}'")
         self._clients: list[Client] = [_make_client(url) for url in rpc_urls]
+        self._buckets = [bucket_key(url.get_secret_value()) for url in rpc_urls]
+        self._limiter: IRateLimiter = rate_limiter or NoopRateLimiter()
+        self._high_priority = high_priority
         self._timeout = timeout_seconds
         self._attempts = max_retries + 1
         self._semaphore = asyncio.Semaphore(max_concurrency)
@@ -132,16 +153,24 @@ class EvmChainProvider(BaseChainProvider):
     async def _request(self, op: str, fn: Callable[[Client], Awaitable[T]]) -> T:
         """Run `fn` against the active endpoint, falling back to the others on failure."""
         errors: list[str] = []
+        cost = method_cost(op)
         async with self._semaphore:
             for offset in range(len(self._clients)):
                 index = (self._active + offset) % len(self._clients)
                 client = self._clients[index]
+                bucket = self._buckets[index]
+
+                async def wait_budget(bucket: str = bucket) -> None:
+                    await self._limiter.acquire(bucket, cost, high_priority=self._high_priority)
+
                 try:
                     result = await retry_async(
                         lambda client=client: fn(client),  # type: ignore[misc]
                         attempts=self._attempts,
                         timeout_seconds=self._timeout,
                         retry_on=_TRANSIENT_ERRORS,
+                        before_attempt=wait_budget,
+                        retry_delay=_rate_limit_delay,
                     )
                 except ContractLogicError as exc:
                     raise ContractCallError(f"{op} reverted: {redact(str(exc))}") from None

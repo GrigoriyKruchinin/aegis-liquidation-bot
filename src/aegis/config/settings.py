@@ -108,6 +108,11 @@ class AppSettings(DatabaseSettings, SchedulerSettings):
     rpc_max_retries: int = Field(default=3, ge=0, le=10)
     rpc_max_concurrency: int = Field(default=8, ge=1, le=64)
     multicall_batch_size: int = Field(default=150, ge=1, le=1000)
+    #: Shared throughput budget per RPC provider key, in compute units/s across ALL chains and
+    #: processes (Alchemy limits CUPS per app). 0 disables client-side rate limiting.
+    rpc_cu_per_second: int = Field(default=300, ge=0)
+    #: Share of the budget reserved for the latency-critical watcher (indexer/scans use the rest).
+    rpc_reserve_pct: int = Field(default=30, ge=0, le=90)
 
     # --- Scanning ----------------------------------------------------------------------------
     min_profit_usd: Decimal = Field(default=Decimal("5"), ge=0)
@@ -149,6 +154,11 @@ class AppSettings(DatabaseSettings, SchedulerSettings):
         if self.alchemy_api_key is not None and chain_config and chain_config.alchemy_network:
             key = self.alchemy_api_key.get_secret_value()
             urls.append(SecretStr(f"https://{chain_config.alchemy_network}.g.alchemy.com/v2/{key}"))
+        # The same URL twice is no fallback (same node, same quota): keep the first occurrence.
+        unique: dict[str, SecretStr] = {}
+        for url in urls:
+            unique.setdefault(url.get_secret_value().rstrip("/"), url)
+        urls = list(unique.values())
         if not urls:
             raise ConfigurationError(
                 f"no RPC URL for chain '{chain}': set ALCHEMY_API_KEY or {chain.upper()}_RPC_URLS"

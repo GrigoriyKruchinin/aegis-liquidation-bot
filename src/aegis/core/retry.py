@@ -18,6 +18,8 @@ async def retry_async[T](
     retry_on: tuple[type[BaseException], ...],
     base_delay_seconds: float = 0.25,
     max_delay_seconds: float = 4.0,
+    before_attempt: Callable[[], Awaitable[None]] | None = None,
+    retry_delay: Callable[[BaseException, int], float | None] | None = None,
 ) -> T:
     """Run `func` with a timeout per attempt, retrying on the given exceptions.
 
@@ -28,6 +30,10 @@ async def retry_async[T](
         retry_on: Exception types that trigger a retry. `TimeoutError` is always retried.
         base_delay_seconds: Initial backoff delay.
         max_delay_seconds: Backoff cap.
+        before_attempt: Awaited before every attempt, *outside* the timeout (e.g. waiting for a
+            rate-limit budget must not count as request time).
+        retry_delay: Optional override of the backoff for a given exception and attempt index
+            (e.g. honour HTTP 429 `Retry-After`); return `None` to use the default backoff.
 
     Raises:
         The last exception raised by `func` when all attempts fail.
@@ -37,6 +43,8 @@ async def retry_async[T](
     catch: tuple[type[BaseException], ...] = (TimeoutError, *retry_on)
     last_exc: BaseException | None = None
     for attempt in range(attempts):
+        if before_attempt is not None:
+            await before_attempt()
         try:
             async with asyncio.timeout(timeout_seconds):
                 return await func()
@@ -44,6 +52,10 @@ async def retry_async[T](
             last_exc = exc
             if attempt == attempts - 1:
                 break
+            override = retry_delay(exc, attempt) if retry_delay is not None else None
+            if override is not None:
+                await asyncio.sleep(override)
+                continue
             delay = min(max_delay_seconds, base_delay_seconds * 2**attempt)
             await asyncio.sleep(delay * (0.5 + random.random() / 2))  # noqa: S311  # jitter only
     assert last_exc is not None  # noqa: S101  # loop ran at least once

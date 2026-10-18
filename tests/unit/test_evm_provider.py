@@ -126,3 +126,52 @@ def test_clients_have_no_request_issuing_middleware() -> None:
     names = {name for _mw, name in provider._clients[0].middleware_onion.middleware}
     assert "validation" not in names  # would add 2x eth_chainId per eth_call
     assert not names & {"ens_name_to_address", "gas_price_strategy", "gas_estimate"}
+
+
+class RecordingLimiter:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, int, bool]] = []
+
+    async def acquire(self, bucket: str, cost: int, *, high_priority: bool) -> None:
+        self.calls.append((bucket, cost, high_priority))
+
+
+async def test_rate_limiter_charged_per_attempt_with_method_cost(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("aegis.core.retry.asyncio.sleep", _no_sleep)
+    limiter = RecordingLimiter()
+    provider = EvmChainProvider(
+        BASE,
+        [SecretStr("https://base-mainnet.g.alchemy.com/v2/K")],
+        rate_limiter=limiter,
+        high_priority=True,
+        max_retries=1,
+    )
+    provider._clients = cast(Any, [FakeClient([OSError("reset"), 5])])
+    assert await provider.block_number() == 5
+    assert len(limiter.calls) == 2  # one budget acquisition per attempt
+    bucket, cost, high = limiter.calls[0]
+    assert bucket.startswith("alchemy.com:") and cost == 10 and high
+
+
+async def test_http_429_honours_retry_after(monkeypatch: pytest.MonkeyPatch) -> None:
+    import aiohttp
+    from multidict import CIMultiDict, CIMultiDictProxy
+
+    slept: list[float] = []
+
+    async def record(seconds: float) -> None:
+        slept.append(seconds)
+
+    monkeypatch.setattr("aegis.core.retry.asyncio.sleep", record)
+    error = aiohttp.ClientResponseError(
+        request_info=None,  # type: ignore[arg-type]
+        history=(),
+        status=429,
+        message="Too Many Requests",
+        headers=CIMultiDictProxy(CIMultiDict({"Retry-After": "3"})),
+    )
+    provider = make_provider(FakeClient([error, 9]))
+    assert await provider.block_number() == 9
+    assert slept == [3.0]

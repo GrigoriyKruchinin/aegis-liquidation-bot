@@ -21,6 +21,7 @@ from aegis.core.interfaces import (
     BaseChainProvider,
     BaseLendingProtocol,
     INotificationDispatcher,
+    IRateLimiter,
     ScanResult,
 )
 from aegis.db.repositories import (
@@ -42,6 +43,7 @@ from aegis.scanner.indexer import EventBorrowerIndexer
 from aegis.scanner.orchestrator import ScanOrchestrator
 from aegis.workers.redis_tools import (
     RedisAlertDeduplicator,
+    RedisRateLimiter,
     RedisTaskLock,
     heartbeat_age_seconds,
 )
@@ -51,6 +53,9 @@ DispatcherFactory = Callable[[], INotificationDispatcher]
 
 def _build_markets(
     settings: AppSettings,
+    rate_limiter: IRateLimiter | None = None,
+    *,
+    high_priority: bool = False,
 ) -> tuple[
     dict[str, BaseChainProvider],
     dict[str, list[BaseLendingProtocol]],
@@ -69,6 +74,8 @@ def _build_markets(
             max_retries=settings.rpc_max_retries,
             max_concurrency=settings.rpc_max_concurrency,
             multicall_batch_size=settings.multicall_batch_size,
+            rate_limiter=rate_limiter,
+            high_priority=high_priority,
         )
         oracle = ChainlinkNativePriceOracle(provider, chain.native_usd_feed)
         deps = ProtocolDeps(native_oracle=oracle)
@@ -106,8 +113,21 @@ class Container:
     closed: bool = field(default=False)
 
     @classmethod
-    def build(cls, settings: AppSettings, dispatcher_factory: DispatcherFactory) -> Container:
-        """Construct all services (no network I/O happens here)."""
+    def build(
+        cls,
+        settings: AppSettings,
+        dispatcher_factory: DispatcherFactory,
+        *,
+        rpc_high_priority: bool = False,
+    ) -> Container:
+        """Construct all services (no network I/O happens here).
+
+        Args:
+            settings: Application settings.
+            dispatcher_factory: Builds the notification dispatcher.
+            rpc_high_priority: True for the latency-critical watcher process: its RPC calls may
+                use the reserved part of the shared compute-unit budget.
+        """
         engine = create_engine(settings.database_url)
         sessions = create_session_factory(engine)
         redis = Redis.from_url(settings.redis_url)
@@ -117,7 +137,14 @@ class Container:
         opportunities = SqlOpportunityRepository(sessions)
         deduplicator = RedisAlertDeduplicator(redis, settings.alert_dedup_ttl_seconds)
 
-        providers, markets, oracles = _build_markets(settings)
+        limiter = (
+            RedisRateLimiter(redis, settings.rpc_cu_per_second, settings.rpc_reserve_pct)
+            if settings.rpc_cu_per_second > 0
+            else None
+        )
+        providers, markets, oracles = _build_markets(
+            settings, limiter, high_priority=rpc_high_priority
+        )
         estimators = {
             name: ProfitEstimator(
                 L2GasEstimator(providers[name], oracles[name]),

@@ -265,3 +265,15 @@ class IStatusRepository(Protocol):
         ...
 
     async def activity_since(self, since: datetime) -> ActivityStats: ...
+
+
+class IRateLimiter(Protocol):
+    """Shared RPC throughput budget (compute units per second) per provider bucket."""
+
+    async def acquire(self, bucket: str, cost: int, *, high_priority: bool) -> None:
+        """Wait until `cost` units may be spent from `bucket`.
+
+        Low-priority callers (indexer, scheduled scans) may only use the budget above a reserve
+        kept for high-priority callers (the latency-critical watcher).
+        """
+        ...

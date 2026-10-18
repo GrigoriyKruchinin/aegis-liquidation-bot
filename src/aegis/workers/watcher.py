@@ -26,7 +26,9 @@ async def run() -> None:
     """Build the container and run all chain watchers until SIGTERM/SIGINT."""
     settings = get_settings()
     configure_logging(settings.log_level, settings.log_json)
-    container = Container.build(settings, lambda: CeleryNotificationDispatcher(app))
+    container = Container.build(
+        settings, lambda: CeleryNotificationDispatcher(app), rpc_high_priority=True
+    )
     config = WatcherConfig(
         min_interval_ms=settings.watcher_min_interval_ms,
         head_poll_ms=settings.watcher_head_poll_ms,

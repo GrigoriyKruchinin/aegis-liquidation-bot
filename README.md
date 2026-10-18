@@ -130,6 +130,8 @@ All settings come from environment variables or `.env`. See [`.env.example`](.en
 | `ALERT_DEDUP_TTL_SECONDS` | `3600` | Suppress repeat alerts for the same borrower |
 | `STATUS_REPORT_INTERVAL_HOURS` | `1` | Periodic 📊 status report to Telegram (`0` disables it) |
 | `RPC_TIMEOUT_SECONDS` / `RPC_MAX_RETRIES` / `RPC_MAX_CONCURRENCY` | `15` / `3` / `8` | RPC resilience |
+| `RPC_CU_PER_SECOND` | `300` | Shared throughput budget per provider key, in compute units/s, across all chains and services. It is enforced with a Redis token bucket and prevents HTTP 429. Set it to about 80% of your plan's CUPS; `0` disables it |
+| `RPC_RESERVE_PCT` | `30` | Share of the budget reserved for the watcher. The indexer and scheduled scans use the rest, so a backfill never slows down detection |
 | `POSTGRES_*`, `REDIS_URL` | local defaults | Overridden by docker-compose for containers |
 
 ## Security notes
