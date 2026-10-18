@@ -71,6 +71,10 @@ class SchedulerSettings(_EnvSettings):
     scan_interval_seconds: int = Field(default=30, ge=5)
     #: Periodic "bot is alive" Telegram report; 0 disables it.
     status_report_interval_hours: int = Field(default=1, ge=0, le=168)
+    #: Market measurement: index competitors' liquidations and analyse them.
+    market_enabled: bool = True
+    market_index_interval_seconds: int = Field(default=300, ge=30)
+    market_enrich_interval_seconds: int = Field(default=120, ge=30)
 
     @field_validator("enabled_chains", mode="before")
     @classmethod
@@ -123,6 +127,15 @@ class AppSettings(DatabaseSettings, SchedulerSettings):
     watcher_head_poll_ms: int = Field(default=200, ge=50, le=10_000)
     watcher_price_move_bps: int = Field(default=50, ge=1, le=5000)
     watcher_rescan_cooldown_seconds: int = Field(default=5, ge=1, le=600)
+    # --- Market measurement ------------------------------------------------------------------
+    market_lookback_days: int = Field(default=30, ge=1, le=365)
+    market_log_chunk_blocks: int = Field(default=10_000, ge=10)
+    market_max_blocks_per_run: int = Field(default=1_000_000, ge=1000)
+    #: How far back the binary search looks for the start of a liquidatable window.
+    market_lag_window_minutes: int = Field(default=120, ge=1, le=24 * 60)
+    market_enrich_batch: int = Field(default=25, ge=1, le=500)
+    #: Dust liquidations below this gross profit skip the archive lag search (saves RPC).
+    market_lag_min_gross_usd: Decimal = Field(default=Decimal(1), ge=0)
     indexer_lookback_days: int = Field(default=30, ge=1)
     indexer_log_chunk_blocks: int = Field(default=2000, ge=1)
     indexer_max_blocks_per_run: int = Field(default=200_000, ge=1)

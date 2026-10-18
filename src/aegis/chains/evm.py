@@ -8,13 +8,15 @@ from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, TypeVar, cast
 
 import aiohttp
-from eth_typing import BlockIdentifier
+from eth_typing import BlockIdentifier, HexStr
 from pydantic import SecretStr
 from web3 import AsyncHTTPProvider, AsyncWeb3
 from web3.exceptions import (
     BadResponseFormat,
+    BlockNotFound,
     ContractLogicError,
     ProviderConnectionError,
+    TransactionNotFound,
     Web3RPCError,
 )
 from web3.types import FilterParams, LogReceipt, TopicFilter, TxParams
@@ -24,14 +26,16 @@ from aegis.chains.ratelimit import NoopRateLimiter, bucket_key, method_cost
 from aegis.config.chains import ChainConfig
 from aegis.core.abi import checksum
 from aegis.core.errors import (
+    ChainDataNotFoundError,
     ConfigurationError,
     ContractCallError,
+    HistoricalStateUnavailableError,
     LogRangeTooLargeError,
     RpcError,
 )
 from aegis.core.interfaces import BaseChainProvider, BlockId, IRateLimiter
 from aegis.core.logging import get_logger
-from aegis.core.models import Call, CallResult, LogEntry, LogFilter, TxTemplate
+from aegis.core.models import Call, CallResult, LogEntry, LogFilter, TxReceiptInfo, TxTemplate
 from aegis.core.redact import redact, safe_error
 from aegis.core.retry import retry_async
 
@@ -48,8 +52,11 @@ _TRANSIENT_ERRORS: tuple[type[BaseException], ...] = (
 
 _FAILOVER_ERRORS: tuple[type[BaseException], ...] = (TimeoutError, *_TRANSIENT_ERRORS)
 
-_LOG_RANGE_HTTP_STATUSES = frozenset({400, 413})
+# Oversized eth_getLogs ranges come back as bare HTTP 400/413 (dRPC) or 500 (public OP nodes).
+# A real outage also shrinks the window, but the indexer then gives up and restarts at full size.
+_LOG_RANGE_HTTP_STATUSES = frozenset({400, 413, 500})
 RATE_LIMIT_MAX_DELAY_SECONDS = 10.0
+BLOCK_TIME_CACHE_SIZE = 10_000
 
 _LOG_RANGE_HINTS = (
     "block range",
@@ -66,6 +73,19 @@ _LOG_RANGE_HINTS = (
 logger = get_logger("chains.evm")
 
 
+def _as_int(value: object) -> int:
+    """Receipt fields can be ints or hex strings (chain-specific extras such as `l1Fee`)."""
+    if value is None:
+        return 0
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        return int(value, 16) if value.startswith("0x") else int(value)
+    if isinstance(value, bytes):
+        return int.from_bytes(value, "big")
+    return int(str(value))
+
+
 def _rate_limit_delay(exc: BaseException, attempt: int) -> float | None:
     """Back off properly on HTTP 429: honour `Retry-After`, else 1 s, 2 s, 4 s (max 10 s)."""
     if not isinstance(exc, aiohttp.ClientResponseError) or exc.status != 429:
@@ -75,6 +95,23 @@ def _rate_limit_delay(exc: BaseException, attempt: int) -> float | None:
         with contextlib.suppress(ValueError):
             return min(RATE_LIMIT_MAX_DELAY_SECONDS, max(0.0, float(header)))
     return min(RATE_LIMIT_MAX_DELAY_SECONDS, float(2**attempt))
+
+
+_MISSING_STATE_HINTS = (
+    "missing trie node",
+    "header not found",
+    "state not available",
+    "historical state",
+    "state is not available",
+    "required historical state",
+    "pruned",
+    "archive",
+)
+
+
+def _is_missing_state_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return any(hint in message for hint in _MISSING_STATE_HINTS)
 
 
 def _is_log_range_error(exc: Exception) -> bool:
@@ -149,10 +186,13 @@ class EvmChainProvider(BaseChainProvider):
         self._semaphore = asyncio.Semaphore(max_concurrency)
         self._batch_size = multicall_batch_size
         self._active = 0
+        self._block_times: dict[int, int] = {}
 
     async def _request(self, op: str, fn: Callable[[Client], Awaitable[T]]) -> T:
         """Run `fn` against the active endpoint, falling back to the others on failure."""
         errors: list[str] = []
+        deterministic: list[RpcError] = []
+        not_found = False
         cost = method_cost(op)
         async with self._semaphore:
             for offset in range(len(self._clients)):
@@ -174,8 +214,15 @@ class EvmChainProvider(BaseChainProvider):
                     )
                 except ContractLogicError as exc:
                     raise ContractCallError(f"{op} reverted: {redact(str(exc))}") from None
-                except LogRangeTooLargeError:
-                    raise
+                except (LogRangeTooLargeError, HistoricalStateUnavailableError) as exc:
+                    # Another endpoint may accept the range / be an archive node: try it first.
+                    deterministic.append(exc)
+                    errors.append(f"endpoint#{index}: {safe_error(exc)}")
+                    continue
+                except (TransactionNotFound, BlockNotFound) as exc:
+                    not_found = True
+                    errors.append(f"endpoint#{index}: {type(exc).__name__}")
+                    continue
                 except _FAILOVER_ERRORS as exc:
                     errors.append(f"endpoint#{index}: {safe_error(exc)}")
                     logger.warning(
@@ -188,7 +235,12 @@ class EvmChainProvider(BaseChainProvider):
                     continue
                 self._active = index
                 return result
-        raise RpcError(f"{self.name} {op} failed on all endpoints: {'; '.join(errors)}")
+        summary = f"{self.name} {op} failed on all endpoints: {'; '.join(errors)}"
+        if deterministic and len(deterministic) == len(errors):
+            raise type(deterministic[0])(summary)
+        if not_found:
+            raise ChainDataNotFoundError(summary)
+        raise RpcError(summary)
 
     async def block_number(self) -> int:
         """Latest block number."""
@@ -216,9 +268,14 @@ class EvmChainProvider(BaseChainProvider):
         params: TxParams = {"to": checksum(to), "data": data}
 
         async def fn(client: Client) -> bytes:
-            return bytes(
-                await client.eth.call(params, block_identifier=cast(BlockIdentifier, block))
-            )
+            try:
+                return bytes(
+                    await client.eth.call(params, block_identifier=cast(BlockIdentifier, block))
+                )
+            except Web3RPCError as exc:
+                if isinstance(block, int) and _is_missing_state_error(exc):
+                    raise HistoricalStateUnavailableError(redact(str(exc))) from None
+                raise
 
         return await self._request("eth_call", fn)
 
@@ -250,7 +307,10 @@ class EvmChainProvider(BaseChainProvider):
         """
         params: FilterParams = {
             "address": checksum(log_filter.address),
-            "topics": cast(list[TopicFilter], list(log_filter.topics)),
+            "topics": cast(
+                list[TopicFilter],
+                [list(t) if isinstance(t, tuple) else t for t in log_filter.topics],
+            ),
             "fromBlock": from_block,
             "toBlock": to_block,
         }
@@ -274,6 +334,46 @@ class EvmChainProvider(BaseChainProvider):
     async def l1_data_fee(self, tx: TxTemplate) -> int:
         """No L1 data fee on a generic EVM chain."""
         return 0
+
+    async def block_timestamp(self, block: int) -> int:
+        """Unix timestamp of a block (cached: blocks are immutable once buried)."""
+        cached = self._block_times.get(block)
+        if cached is not None:
+            return cached
+
+        async def fn(client: Client) -> int:
+            header = await client.eth.get_block(block)
+            return int(header["timestamp"])
+
+        timestamp = await self._request("eth_getBlockByNumber", fn)
+        if len(self._block_times) > BLOCK_TIME_CACHE_SIZE:
+            self._block_times.clear()
+        self._block_times[block] = timestamp
+        return timestamp
+
+    async def transaction_receipt(self, tx_hash: str) -> TxReceiptInfo:
+        """Receipt (sender, gas, L1 fee, position in block) plus the block timestamp."""
+
+        async def fn(client: Client) -> Any:
+            return await client.eth.get_transaction_receipt(HexStr(tx_hash))
+
+        receipt = await self._request("eth_getTransactionReceipt", fn)
+        block = int(receipt["blockNumber"])
+        to = receipt.get("to")
+        return TxReceiptInfo(
+            tx_from=checksum(receipt["from"]),
+            tx_to=checksum(to) if to else None,
+            tx_index=int(receipt["transactionIndex"]),
+            gas_used=int(receipt["gasUsed"]),
+            effective_gas_price=_as_int(receipt.get("effectiveGasPrice")),
+            l1_fee=_as_int(receipt.get("l1Fee")),
+            status=int(receipt.get("status", 1)),
+            block_timestamp=await self.block_timestamp(block),
+            logs_in_tx=len(receipt.get("logs", ())),
+            log_topic0s=tuple(
+                bytes(log["topics"][0]) for log in receipt.get("logs", ()) if log.get("topics")
+            ),
+        )
 
     async def aclose(self) -> None:
         """Close HTTP sessions of all endpoints."""

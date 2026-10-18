@@ -175,3 +175,46 @@ async def test_http_429_honours_retry_after(monkeypatch: pytest.MonkeyPatch) -> 
     provider = make_provider(FakeClient([error, 9]))
     assert await provider.block_number() == 9
     assert slept == [3.0]
+
+
+async def test_log_range_error_tries_next_endpoint_first() -> None:
+    narrow = FakeClient([Web3RPCError("query exceeds max block range 500")])
+    wide = FakeClient([[]])
+    provider = make_provider(narrow, wide)
+    assert await provider.get_logs(LogFilter("0x" + "11" * 20, (None,)), 1, 10_000) == []
+    assert narrow.eth.calls == 1 and wide.eth.calls == 1
+
+
+async def test_log_range_error_raised_when_all_endpoints_reject() -> None:
+    provider = make_provider(
+        FakeClient([Web3RPCError("block range too large")]),
+        FakeClient([Web3RPCError("range is too large")]),
+    )
+    with pytest.raises(LogRangeTooLargeError):
+        await provider.get_logs(LogFilter("0x" + "11" * 20, (None,)), 1, 10_000)
+
+
+async def test_missing_historical_state_is_not_retried() -> None:
+    from aegis.core.errors import HistoricalStateUnavailableError
+
+    client = FakeClient([Web3RPCError("missing trie node abc (path )")])
+    provider = make_provider(client)
+    with pytest.raises(HistoricalStateUnavailableError):
+        await provider.call("0x" + "11" * 20, b"\x00" * 4, block=123)
+    assert client.eth.calls == 1
+
+
+async def test_transaction_not_found_maps_to_chain_data_error() -> None:
+    from web3.exceptions import TransactionNotFound
+
+    from aegis.core.errors import ChainDataNotFoundError
+
+    class ReceiptEth(FakeEth):
+        async def get_transaction_receipt(self, tx_hash: Any) -> Any:
+            raise TransactionNotFound("not found")
+
+    client = FakeClient([0])
+    client.eth = ReceiptEth([0])
+    provider = make_provider(client)
+    with pytest.raises(ChainDataNotFoundError):
+        await provider.transaction_receipt("0x" + "ab" * 32)

@@ -15,8 +15,11 @@ from aegis.core.models import (
     ActivityStats,
     Call,
     CallResult,
+    EventEnrichment,
+    EventValuation,
     GasEstimate,
     HealthCheck,
+    LiquidationEvent,
     LiquidationOpportunity,
     LiquidationQuote,
     LogEntry,
@@ -26,6 +29,8 @@ from aegis.core.models import (
     OpportunitySummary,
     Position,
     ProfitEstimate,
+    Sighting,
+    TxReceiptInfo,
     TxTemplate,
 )
 
@@ -73,6 +78,10 @@ class BaseChainProvider(ABC):
     @abstractmethod
     async def l1_data_fee(self, tx: TxTemplate) -> int:
         """L1 data-availability fee in wei for a transaction (0 on chains without one)."""
+
+    @abstractmethod
+    async def transaction_receipt(self, tx_hash: str) -> TxReceiptInfo:
+        """Receipt details of a mined transaction, including its block timestamp."""
 
     async def aclose(self) -> None:  # noqa: B027  # optional hook
         """Release network resources."""
@@ -147,11 +156,41 @@ class BaseLendingProtocol(ABC):
         """Decode `price_calls` results into raw prices (0 for unreadable entries)."""
         return ()
 
+    # --- Market measurement (optional; adapters that do not support it keep the defaults) ----
+
+    def liquidation_filter(self) -> LogFilter | None:
+        """Event filter matching this market's liquidation activity."""
+        return None
+
+    def decode_liquidation(self, log: LogEntry) -> LiquidationEvent | None:
+        """Decode one liquidation-related log."""
+        return None
+
+    async def value_liquidation(self, event: LiquidationEvent) -> EventValuation | None:
+        """USD value of the event at its own block (historical oracle prices)."""
+        return None
+
+    async def is_liquidatable_at(self, borrower: str, block: int) -> bool | None:
+        """Whether `borrower` was liquidatable at the end of `block` (`None` = unsupported)."""
+        return None
+
+    def asset_symbol(self, address: str | None) -> str | None:
+        """Symbol of a market asset, if known."""
+        return None
+
+    def gas_bearing_topics(self) -> frozenset[bytes]:
+        """topic0 of events that each represent one paid liquidation action (to split gas)."""
+        return frozenset()
+
 
 class IPriceOracle(Protocol):
     """Native token USD price source used for gas costing."""
 
     async def native_price_usd(self) -> Decimal: ...
+
+    async def native_price_usd_at(self, block: int) -> Decimal:
+        """Price as of `block` (historical analysis; needs archive state)."""
+        ...
 
 
 class IGasEstimator(Protocol):
@@ -180,11 +219,19 @@ class IndexResult:
 
 @dataclass(frozen=True, slots=True)
 class ScanResult:
-    """Outcome of one health-factor scan."""
+    """Outcome of one health-factor scan.
+
+    Attributes:
+        liquidatable_checks: Every liquidatable account above the dust filter (whether or not it
+            is profitable), used to record sightings for market analysis.
+        healthy: Accounts checked and found not liquidatable.
+    """
 
     checked: int
     liquidatable: int
     opportunities: tuple[LiquidationOpportunity, ...]
+    liquidatable_checks: tuple[HealthCheck, ...] = ()
+    healthy: frozenset[str] = frozenset()
 
 
 class IBorrowerIndexer(Protocol):
@@ -234,11 +281,11 @@ class IBorrowerRepository(Protocol):
 
 
 class ICheckpointRepository(Protocol):
-    """Last indexed block per market."""
+    """Last indexed block per market and event stream."""
 
-    async def get(self, market: MarketRef) -> int | None: ...
+    async def get(self, market: MarketRef, stream: str = "borrowers") -> int | None: ...
 
-    async def set(self, market: MarketRef, block: int) -> None: ...
+    async def set(self, market: MarketRef, block: int, stream: str = "borrowers") -> None: ...
 
 
 class IOpportunityRepository(Protocol):
@@ -276,4 +323,70 @@ class IRateLimiter(Protocol):
         Low-priority callers (indexer, scheduled scans) may only use the budget above a reserve
         kept for high-priority callers (the latency-critical watcher).
         """
+        ...
+
+
+class ISightingRepository(Protocol):
+    """Episodes during which our bot saw a borrower liquidatable."""
+
+    async def record(
+        self, market: MarketRef, sightings: Sequence[Sighting], healthy: frozenset[str]
+    ) -> None:
+        """Open/extend episodes for `sightings`; close open episodes of `healthy` borrowers."""
+        ...
+
+    async def first_seen(
+        self, market: MarketRef, borrower: str, at: datetime, gap_seconds: int
+    ) -> datetime | None:
+        """Start of our episode that was still ongoing at `at`.
+
+        An episode counts if it started before `at` and was still open, or was last seen no
+        more than `gap_seconds` before `at`.
+        """
+        ...
+
+    async def close(
+        self, market: MarketRef, borrower: str, reason: str, started_before: datetime
+    ) -> None:
+        """Close the open episode of `borrower` if it started before `started_before`."""
+        ...
+
+
+class IUptimeRepository(Protocol):
+    """Minute buckets in which the watcher was processing blocks."""
+
+    async def mark(self, chain: str, minute: datetime) -> None: ...
+
+    async def was_online(self, chain: str, at: datetime) -> bool: ...
+
+
+class ILiquidationEventRepository(Protocol):
+    """Raw and enriched liquidation events (market / competitor analysis)."""
+
+    async def add(self, events: Sequence[LiquidationEvent]) -> int:
+        """Insert new events (idempotent per tx/log); returns how many were new."""
+        ...
+
+    async def pending(
+        self, limit: int, max_attempts: int
+    ) -> list[tuple[int, int, LiquidationEvent]]:
+        """Events not enriched yet as ``(id, attempts so far, event)``, oldest first."""
+        ...
+
+    async def previous_liquidation_block(
+        self, market: MarketRef, borrower: str, before_block: int, since_block: int
+    ) -> int | None:
+        """Block of the latest earlier liquidation of `borrower` in ``[since, before)``."""
+        ...
+
+    async def events_in_tx(self, chain: str, tx_hash: str) -> int:
+        """Number of recorded events sharing one transaction (to split its gas)."""
+        ...
+
+    async def save_enrichment(self, event_id: int, enrichment: EventEnrichment) -> None: ...
+
+    async def mark_failed(self, event_id: int, error: str) -> None: ...
+
+    async def borrower_known(self, market: MarketRef, borrower: str, before_block: int) -> bool:
+        """Whether our indexer had discovered the borrower before `before_block`."""
         ...

@@ -63,7 +63,11 @@ class HealthFactorScanner:
         checks: list[HealthCheck] = [check for batch in batches for check in batch]
         await self._borrowers.update_health(market, checks, self._min_debt)
 
-        targets = [c.borrower for c in checks if c.liquidatable and c.debt_usd >= self._min_debt]
+        liquidatable_checks = tuple(
+            c for c in checks if c.liquidatable and c.debt_usd >= self._min_debt
+        )
+        healthy = frozenset(c.borrower for c in checks if not c.liquidatable)
+        targets = [c.borrower for c in liquidatable_checks]
         opportunities: list[LiquidationOpportunity] = []
         for batch in _batches(targets, self._position_batch):
             try:
@@ -96,5 +100,9 @@ class HealthFactorScanner:
             opportunities=len(opportunities),
         )
         return ScanResult(
-            checked=len(checks), liquidatable=len(targets), opportunities=tuple(opportunities)
+            checked=len(checks),
+            liquidatable=len(targets),
+            opportunities=tuple(opportunities),
+            liquidatable_checks=liquidatable_checks,
+            healthy=healthy,
         )

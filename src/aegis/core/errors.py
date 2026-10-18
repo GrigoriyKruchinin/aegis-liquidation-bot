@@ -26,6 +26,14 @@ class LogRangeTooLargeError(RpcError):
     """The RPC node rejected an `eth_getLogs` request because the block range is too large."""
 
 
+class ChainDataNotFoundError(RpcError):
+    """The node does not know the requested transaction / block (lagging or pruned node)."""
+
+
+class HistoricalStateUnavailableError(RpcError):
+    """The node cannot serve state at an old block (not an archive node). Not transient."""
+
+
 class ContractCallError(AegisError):
     """A contract call reverted or returned undecodable data."""
 

@@ -11,6 +11,9 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 
+from eth_abi.abi import decode as abi_decode
+from eth_abi.exceptions import DecodingError
+
 from aegis.config.chains import ChainConfig
 from aegis.core.abi import AbiFunction, checksum, event_topic, topic_to_address
 from aegis.core.errors import ProtocolError
@@ -23,7 +26,9 @@ from aegis.core.models import (
     CallResult,
     CollateralLeg,
     DebtLeg,
+    EventValuation,
     HealthCheck,
+    LiquidationEvent,
     LiquidationQuote,
     LogEntry,
     LogFilter,
@@ -84,6 +89,13 @@ LIQUIDATION_CALL = AbiFunction("liquidationCall(address,address,address,uint256,
 # Borrow(address indexed reserve, address user, address indexed onBehalfOf, uint256 amount,
 #        uint8 interestRateMode, uint256 borrowRate, uint16 indexed referralCode)
 BORROW_TOPIC = event_topic("Borrow(address,address,address,uint256,uint8,uint256,uint16)")
+# LiquidationCall(address indexed collateralAsset, address indexed debtAsset, address indexed user,
+#                 uint256 debtToCover, uint256 liquidatedCollateralAmount, address liquidator,
+#                 bool receiveAToken)
+LIQUIDATION_CALL_TOPIC = event_topic(
+    "LiquidationCall(address,address,address,uint256,uint256,address,bool)"
+)
+LIQUIDATION_CALL_DATA = ("uint256", "uint256", "address", "bool")
 
 # --- Protocol constants ----------------------------------------------------------------------
 PERCENTAGE_FACTOR = Decimal(10_000)
@@ -540,6 +552,78 @@ class AaveV3Protocol(BaseLendingProtocol):
         """Raw oracle prices in base-currency units, in reserve order."""
         decoded = decode_result(GET_ASSETS_PRICES, results[0]) if results else None
         return tuple(int(p) for p in decoded[0]) if decoded else ()
+
+    # --- Market measurement ------------------------------------------------------------------
+
+    def _reserve(self, address: str | None) -> Reserve | None:
+        if address is None:
+            return None
+        wanted = address.lower()
+        return next((r for r in self._reserves if r.asset.address.lower() == wanted), None)
+
+    def asset_symbol(self, address: str | None) -> str | None:
+        """Symbol of a reserve asset."""
+        reserve = self._reserve(address)
+        return reserve.asset.symbol if reserve else None
+
+    def gas_bearing_topics(self) -> frozenset[bytes]:
+        """Each `LiquidationCall` is one paid action."""
+        return frozenset({LIQUIDATION_CALL_TOPIC})
+
+    def liquidation_filter(self) -> LogFilter:
+        """`LiquidationCall` events of the Pool."""
+        return LogFilter(address=self.pool, topics=(LIQUIDATION_CALL_TOPIC,))
+
+    def decode_liquidation(self, log: LogEntry) -> LiquidationEvent | None:
+        """Decode `LiquidationCall` (collateral, debt and user are indexed)."""
+        if len(log.topics) < 4 or log.topics[0] != LIQUIDATION_CALL_TOPIC:
+            return None
+        try:
+            debt, collateral, liquidator, _receive_a_token = abi_decode(
+                list(LIQUIDATION_CALL_DATA), log.data
+            )
+        except (DecodingError, ValueError):
+            return None
+        return LiquidationEvent(
+            market=self.market,
+            kind="aave_liquidation",
+            tx_hash=log.tx_hash,
+            log_index=log.log_index,
+            block_number=log.block_number,
+            borrower=topic_to_address(log.topics[3]),
+            liquidator=checksum(liquidator),
+            debt_asset=topic_to_address(log.topics[2]),
+            collateral_asset=topic_to_address(log.topics[1]),
+            debt_amount=int(debt),
+            collateral_amount=int(collateral),
+        )
+
+    async def value_liquidation(self, event: LiquidationEvent) -> EventValuation | None:
+        """Repaid debt and seized collateral at the oracle prices of the event's block."""
+        debt_reserve = self._reserve(event.debt_asset)
+        collateral_reserve = self._reserve(event.collateral_asset)
+        if debt_reserve is None or collateral_reserve is None:
+            return None
+        assets = [collateral_reserve.asset.address, debt_reserve.asset.address]
+        raw = await self._provider.call(
+            self.oracle, GET_ASSETS_PRICES.encode(assets), event.block_number
+        )
+        collateral_price, debt_price = (
+            Decimal(int(p)) / self._base_unit for p in GET_ASSETS_PRICES.decode(raw)[0]
+        )
+        return EventValuation(
+            debt_usd=to_units(event.debt_amount, debt_reserve.asset.decimals) * debt_price,
+            collateral_usd=to_units(event.collateral_amount, collateral_reserve.asset.decimals)
+            * collateral_price,
+        )
+
+    async def is_liquidatable_at(self, borrower: str, block: int) -> bool | None:
+        """HF < 1 with non-zero debt at the end of `block` (needs historical state)."""
+        raw = await self._provider.call(
+            self.pool, GET_USER_ACCOUNT_DATA.encode(checksum(borrower)), block
+        )
+        _collateral, debt, _avail, _lt, _ltv, hf = GET_USER_ACCOUNT_DATA.decode(raw)
+        return int(debt) > 0 and int(hf) < WAD
 
 
 @PROTOCOLS.register(PROTOCOL_NAME)

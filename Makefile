@@ -1,4 +1,4 @@
-.PHONY: install format format-check lint typecheck test test-integration check migrate up-local down-local logs-local ps-local contracts-test rpc-latency
+.PHONY: install format format-check lint typecheck test test-integration check migrate up-local down-local logs-local ps-local contracts-test rpc-latency market-report
 
 COMPOSE_LOCAL = docker compose -f docker-compose.local.yml
 
@@ -49,3 +49,15 @@ contracts-test:
 # Compare configured RPC endpoints (latency + head freshness); uses your .env
 rpc-latency:
 	uv run python -m aegis.tools.rpc_latency
+
+# Market / competitor analysis from the data V1 collects (needs the stack running).
+# Writes Markdown + JSON + CSV exports to data/market/ (git-ignored). Usage: make market-report DAYS=14
+DAYS ?= 30
+MARKET_DIR = data/market
+market-report:
+	mkdir -p $(MARKET_DIR)
+	$(COMPOSE_LOCAL) exec -T scanner python -m aegis.tools.market_report --days $(DAYS) > $(MARKET_DIR)/report.md
+	$(COMPOSE_LOCAL) exec -T scanner python -m aegis.tools.market_report --days $(DAYS) --format json > $(MARKET_DIR)/report.json
+	$(COMPOSE_LOCAL) exec -T scanner python -m aegis.tools.market_report --days $(DAYS) --format csv --table events > $(MARKET_DIR)/liquidations.csv
+	$(COMPOSE_LOCAL) exec -T scanner python -m aegis.tools.market_report --days $(DAYS) --format csv --table sightings > $(MARKET_DIR)/sightings.csv
+	@echo "Market report written to $(MARKET_DIR)/ (report.md, report.json, liquidations.csv, sightings.csv)"

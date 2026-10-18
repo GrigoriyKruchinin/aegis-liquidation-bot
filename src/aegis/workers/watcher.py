@@ -10,10 +10,15 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import signal
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
+
+from sqlalchemy.exc import SQLAlchemyError
 
 from aegis.config.settings import get_settings
 from aegis.core.container import Container
 from aegis.core.logging import configure_logging, get_logger
+from aegis.core.redact import safe_error
 from aegis.scanner.watcher import ChainWatcher, WatcherConfig
 from aegis.workers.app import app
 from aegis.workers.dispatcher import CeleryNotificationDispatcher
@@ -41,8 +46,20 @@ async def run() -> None:
         with contextlib.suppress(NotImplementedError):
             loop.add_signal_handler(sig, stop.set)
 
-    async def heartbeat() -> None:
-        await record_heartbeat(container.redis, "watcher")
+    last_minute: dict[str, datetime] = {}
+
+    def on_tick_for(chain: str) -> Callable[[], Awaitable[None]]:
+        async def on_tick() -> None:
+            await record_heartbeat(container.redis, "watcher")
+            minute = datetime.now(UTC).replace(second=0, microsecond=0)
+            if last_minute.get(chain) != minute:  # one uptime row per chain per minute
+                last_minute[chain] = minute
+                try:
+                    await container.uptime.mark(chain, minute)
+                except SQLAlchemyError as exc:
+                    logger.warning("uptime_mark_failed", chain=chain, error=safe_error(exc))
+
+        return on_tick
 
     watchers = [
         ChainWatcher(
@@ -50,7 +67,7 @@ async def run() -> None:
             markets,
             container.orchestrator,
             config,
-            on_tick=heartbeat,
+            on_tick=on_tick_for(chain),
         )
         for chain, markets in container.markets.items()
         if markets

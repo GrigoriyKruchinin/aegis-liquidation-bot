@@ -218,3 +218,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Aegis local exports (market reports, CSV dumps)
+/data/

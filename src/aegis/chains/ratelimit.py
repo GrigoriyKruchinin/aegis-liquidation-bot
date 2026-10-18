@@ -18,6 +18,7 @@ RPC_METHOD_COST: dict[str, int] = {
     "eth_getBlockByNumber": 16,
     "eth_call": 26,
     "eth_getLogs": 75,
+    "eth_getTransactionReceipt": 15,
 }
 DEFAULT_METHOD_COST = 26
 

@@ -125,6 +125,35 @@ services:
       retries: 3
       start_period: 30s
 
+  market-worker:
+    # Competitor analysis: indexes and enriches liquidations (separate queue, never blocks scans).
+    <<: *app
+    command:
+      - celery
+      - -A
+      - aegis.workers.app
+      - worker
+      - -Q
+      - market
+      - -n
+      - market@%h
+      - --concurrency=1
+      - --loglevel=INFO
+    env_file: .env
+    environment:
+      <<: *common-env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A aegis.workers.app inspect ping -d market@$$HOSTNAME --timeout 10"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+      start_period: 30s
+
   watcher:
     # Per-block hot-set re-checks and price-move triggered rescans (low-latency detection).
     <<: *app
@@ -161,10 +190,15 @@ services:
       INDEX_INTERVAL_SECONDS: ${INDEX_INTERVAL_SECONDS:-60}
       SCAN_INTERVAL_SECONDS: ${SCAN_INTERVAL_SECONDS:-30}
       STATUS_REPORT_INTERVAL_HOURS: ${STATUS_REPORT_INTERVAL_HOURS:-1}
+      MARKET_ENABLED: ${MARKET_ENABLED:-true}
+      MARKET_INDEX_INTERVAL_SECONDS: ${MARKET_INDEX_INTERVAL_SECONDS:-300}
+      MARKET_ENRICH_INTERVAL_SECONDS: ${MARKET_ENRICH_INTERVAL_SECONDS:-120}
     depends_on:
       scanner:
         condition: service_healthy
       notifier-worker:
+        condition: service_healthy
+      market-worker:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-m", "aegis.workers.healthcheck", "heartbeat", "--max-age", "300"]

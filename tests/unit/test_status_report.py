@@ -55,7 +55,16 @@ def test_render_status_contents() -> None:
 
 
 def test_render_status_indexing_and_activity() -> None:
-    text = render_status(_report(lag=2 * 3600 + 900, activity=ActivityStats(2, Decimal(42), 1, 1)))
+    text = render_status(
+        _report(
+            lag=2 * 3600 + 900,
+            activity=ActivityStats(2, Decimal(42), 1, 1, 7, Decimal("123.4"), 3),
+        )
+    )
+    assert (
+        "🏁 <b>Market liquidations:</b> 7 · liquidators earned $123.40 · seen by us first: 3"
+        in text
+    )
     assert "⏳ indexing, ~2h 15m behind" in text
     assert "🔎 <b>Opportunities:</b> 2 (best $42.00)" in text
     assert "📨 <b>Alerts sent:</b> 1 · ❌ failed: 1" in text

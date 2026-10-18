@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from sqlalchemy import (
@@ -13,7 +13,9 @@ from sqlalchemy import (
     bindparam,
     func,
     literal_column,
+    or_,
     select,
+    text,
     update,
 )
 from sqlalchemy.dialects.postgresql import insert
@@ -24,12 +26,23 @@ from sqlalchemy.sql.dml import ReturningInsert
 from aegis.core.errors import NotFoundError, RepositoryError
 from aegis.core.models import (
     ActivityStats,
+    EventEnrichment,
     HealthCheck,
+    LiquidationEvent,
     MarketRef,
     MarketStats,
     OpportunitySummary,
+    Sighting,
 )
-from aegis.db.models import BorrowerRow, IndexerCheckpointRow, NotificationRow, OpportunityRow
+from aegis.db.models import (
+    BorrowerRow,
+    IndexerCheckpointRow,
+    LiquidationEventRow,
+    NotificationRow,
+    OpportunityRow,
+    SightingRow,
+    UptimeRow,
+)
 
 # Stored health factors are clamped to fit NUMERIC(38, 18).
 MAX_STORED_HF = Decimal(1_000_000)
@@ -153,21 +166,25 @@ class SqlCheckpointRepository:
     def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
         self._sessions = sessions
 
-    async def get(self, market: MarketRef) -> int | None:
-        """Last indexed block or `None` if the market was never indexed."""
+    async def get(self, market: MarketRef, stream: str = "borrowers") -> int | None:
+        """Last indexed block of `stream`, or `None` if it was never indexed."""
         async with self._sessions() as session:
             row = await session.get(
-                IndexerCheckpointRow, (market.chain, market.protocol, market.address)
+                IndexerCheckpointRow, (market.chain, market.protocol, market.address, stream)
             )
             return None if row is None else row.last_block
 
-    async def set(self, market: MarketRef, block: int) -> None:
-        """Upsert the checkpoint."""
+    async def set(self, market: MarketRef, block: int, stream: str = "borrowers") -> None:
+        """Upsert the checkpoint of `stream`."""
         stmt = insert(IndexerCheckpointRow).values(
-            chain=market.chain, protocol=market.protocol, market=market.address, last_block=block
+            chain=market.chain,
+            protocol=market.protocol,
+            market=market.address,
+            stream=stream,
+            last_block=block,
         )
         stmt = stmt.on_conflict_do_update(
-            index_elements=["chain", "protocol", "market"],
+            index_elements=["chain", "protocol", "market", "stream"],
             set_={"last_block": stmt.excluded.last_block, "updated_at": func.now()},
         )
         async with self._sessions.begin() as session:
@@ -310,12 +327,370 @@ class SqlStatusRepository:
             )
             .group_by(NotificationRow.status)
         )
+        events = LiquidationEventRow
+        market = select(
+            func.count().filter(events.kind.in_(("aave_liquidation", "comet_absorb"))),
+            func.coalesce(
+                func.sum(events.gross_profit_usd).filter(
+                    events.kind.in_(("aave_liquidation", "comet_buy"))
+                ),
+                0,
+            ),
+            func.count().filter(
+                events.kind.in_(("aave_liquidation", "comet_absorb")), events.our_lead_seconds > 0
+            ),
+        ).where(events.block_time >= since)
         async with self._sessions() as session:
             count, best = (await session.execute(opportunities)).one()
             by_status = {status: int(n) for status, n in (await session.execute(alerts)).all()}
+            liquidations, gross, seen_first = (await session.execute(market)).one()
         return ActivityStats(
             opportunities=int(count),
             best_net_profit_usd=None if best is None else Decimal(best),
             alerts_sent=by_status.get("sent", 0),
             alerts_failed=by_status.get("failed", 0),
+            market_liquidations=int(liquidations),
+            market_gross_usd=Decimal(gross or 0),
+            market_seen_first=int(seen_first),
         )
+
+
+class SqlLiquidationEventRepository:
+    """`ILiquidationEventRepository` backed by PostgreSQL."""
+
+    def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
+        self._sessions = sessions
+
+    async def add(self, events: Sequence[LiquidationEvent]) -> int:
+        """Insert new events; duplicates (re-indexed ranges) are ignored."""
+        if not events:
+            return 0
+        rows = [
+            {
+                "chain": e.market.chain,
+                "protocol": e.market.protocol,
+                "market": e.market.address,
+                "market_name": e.market.name,
+                "kind": e.kind,
+                "tx_hash": e.tx_hash,
+                "log_index": e.log_index,
+                "block_number": e.block_number,
+                "borrower": e.borrower,
+                "liquidator": e.liquidator,
+                "debt_asset": e.debt_asset,
+                "collateral_asset": e.collateral_asset,
+                "debt_amount": Decimal(e.debt_amount),
+                "collateral_amount": Decimal(e.collateral_amount),
+                "usd_value_hint": e.usd_value_hint,
+            }
+            for e in events
+        ]
+        inserted = 0
+        try:
+            async with self._sessions.begin() as session:
+                # asyncpg allows 32767 bind parameters per statement: insert in batches.
+                for i in range(0, len(rows), UPSERT_BATCH):
+                    stmt = (
+                        insert(LiquidationEventRow)
+                        .values(rows[i : i + UPSERT_BATCH])
+                        .on_conflict_do_nothing(constraint="uq_liquidation_events_log")
+                        .returning(LiquidationEventRow.id)
+                    )
+                    inserted += len((await session.execute(stmt)).all())
+        except SQLAlchemyError as exc:
+            raise RepositoryError(f"liquidation event insert failed: {type(exc).__name__}") from exc
+        return inserted
+
+    async def pending(
+        self, limit: int, max_attempts: int
+    ) -> list[tuple[int, int, LiquidationEvent]]:
+        """Oldest events that still need enrichment."""
+        stmt = (
+            select(LiquidationEventRow)
+            .where(
+                LiquidationEventRow.enriched.is_(False),
+                LiquidationEventRow.enrich_attempts < max_attempts,
+            )
+            .order_by(LiquidationEventRow.block_number)
+            .limit(limit)
+        )
+        async with self._sessions() as session:
+            rows = (await session.scalars(stmt)).all()
+        return [
+            (
+                row.id,
+                row.enrich_attempts,
+                LiquidationEvent(
+                    market=MarketRef(row.chain, row.protocol, row.market, row.market_name),
+                    kind=row.kind,
+                    tx_hash=row.tx_hash,
+                    log_index=row.log_index,
+                    block_number=row.block_number,
+                    borrower=row.borrower,
+                    liquidator=row.liquidator,
+                    debt_asset=row.debt_asset,
+                    collateral_asset=row.collateral_asset,
+                    debt_amount=int(row.debt_amount),
+                    collateral_amount=int(row.collateral_amount),
+                    usd_value_hint=row.usd_value_hint,
+                ),
+            )
+            for row in rows
+        ]
+
+    async def previous_liquidation_block(
+        self, market: MarketRef, borrower: str, before_block: int, since_block: int
+    ) -> int | None:
+        """Latest earlier liquidation/absorb of the same borrower in the window."""
+        stmt = select(func.max(LiquidationEventRow.block_number)).where(
+            LiquidationEventRow.chain == market.chain,
+            LiquidationEventRow.protocol == market.protocol,
+            LiquidationEventRow.market == market.address,
+            LiquidationEventRow.borrower == borrower,
+            LiquidationEventRow.kind.in_(("aave_liquidation", "comet_absorb")),
+            LiquidationEventRow.block_number < before_block,
+            LiquidationEventRow.block_number >= since_block,
+        )
+        async with self._sessions() as session:
+            result: int | None = await session.scalar(stmt)
+            return result
+
+    async def events_in_tx(self, chain: str, tx_hash: str) -> int:
+        """Count of recorded events in one transaction."""
+        stmt = select(func.count()).where(
+            LiquidationEventRow.chain == chain, LiquidationEventRow.tx_hash == tx_hash
+        )
+        async with self._sessions() as session:
+            return int(await session.scalar(stmt) or 0)
+
+    async def save_enrichment(self, event_id: int, enrichment: EventEnrichment) -> None:
+        """Store enrichment results and mark the event done."""
+        receipt = enrichment.receipt
+        valuation = enrichment.valuation
+        values: dict[str, object] = {
+            "enriched": True,
+            "enrich_error": None,
+            "block_time": enrichment.block_time,
+            "tx_from": receipt.tx_from,
+            "tx_to": receipt.tx_to,
+            "tx_index": receipt.tx_index,
+            "tx_status": receipt.status,
+            "gas_used": receipt.gas_used,
+            "effective_gas_price": Decimal(receipt.effective_gas_price),
+            "l1_fee": Decimal(receipt.l1_fee),
+            "debt_symbol": (enrichment.debt_symbol or "")[:32] or None,
+            "collateral_symbol": (enrichment.collateral_symbol or "")[:32] or None,
+            "debt_usd": valuation.debt_usd if valuation else None,
+            "collateral_usd": valuation.collateral_usd if valuation else None,
+            "gross_profit_usd": valuation.gross_profit_usd if valuation else None,
+            "gas_cost_usd": enrichment.gas_cost_usd,
+            "net_profit_usd": enrichment.net_profit_usd,
+            "liquidatable_since_block": enrichment.liquidatable_since_block,
+            "lag_blocks": enrichment.lag_blocks,
+            "lag_capped": enrichment.lag_capped,
+            "our_first_seen_at": enrichment.our_first_seen_at,
+            "our_lead_seconds": enrichment.our_lead_seconds,
+            "bot_online": enrichment.bot_online,
+            "borrower_known": enrichment.borrower_known,
+            "follow_up": enrichment.follow_up,
+            "data_gaps": enrichment.data_gaps,
+        }
+        stmt = update(LiquidationEventRow).where(LiquidationEventRow.id == event_id).values(values)
+        async with self._sessions.begin() as session:
+            await session.execute(stmt)
+
+    async def mark_failed(self, event_id: int, error: str) -> None:
+        """Record a failed enrichment attempt (retried until `max_attempts`)."""
+        stmt = (
+            update(LiquidationEventRow)
+            .where(LiquidationEventRow.id == event_id)
+            .values(
+                enrich_attempts=LiquidationEventRow.enrich_attempts + 1, enrich_error=error[:500]
+            )
+        )
+        async with self._sessions.begin() as session:
+            await session.execute(stmt)
+
+    async def borrower_known(self, market: MarketRef, borrower: str, before_block: int) -> bool:
+        """True if the borrower was discovered by our indexer before `before_block`."""
+        stmt = select(func.count()).where(
+            *_market_filter(market),
+            BorrowerRow.address == borrower,
+            BorrowerRow.first_seen_block < before_block,
+        )
+        async with self._sessions() as session:
+            return bool(await session.scalar(stmt))
+
+
+class SqlSightingRepository:
+    """`ISightingRepository` backed by PostgreSQL.
+
+    A partial unique index guarantees at most one open episode per borrower and market, so
+    concurrent scanners (watcher + Celery workers) upsert into the same row.
+    """
+
+    def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
+        self._sessions = sessions
+
+    async def record(
+        self, market: MarketRef, sightings: Sequence[Sighting], healthy: frozenset[str]
+    ) -> None:
+        """Open or extend episodes; close the open episodes of borrowers now healthy."""
+        if not sightings and not healthy:
+            return
+        try:
+            await self._record(market, sightings, healthy)
+        except SQLAlchemyError as exc:
+            raise RepositoryError(f"sighting record failed: {type(exc).__name__}") from exc
+
+    async def _record(
+        self, market: MarketRef, sightings: Sequence[Sighting], healthy: frozenset[str]
+    ) -> None:
+        now = datetime.now(UTC)
+        market_cols = (
+            SightingRow.chain == market.chain,
+            SightingRow.protocol == market.protocol,
+            SightingRow.market == market.address,
+        )
+        async with self._sessions.begin() as session:
+            if healthy:
+                open_borrowers = set(
+                    (
+                        await session.scalars(
+                            select(SightingRow.borrower).where(
+                                *market_cols, SightingRow.closed.is_(False)
+                            )
+                        )
+                    ).all()
+                )
+                to_close = sorted(open_borrowers & healthy)
+                if to_close:
+                    await session.execute(
+                        update(SightingRow)
+                        .where(
+                            *market_cols,
+                            SightingRow.closed.is_(False),
+                            SightingRow.borrower.in_(to_close),
+                        )
+                        .values(closed=True, closed_reason="healthy")
+                    )
+            if not sightings:
+                return
+            rows = [
+                {
+                    "chain": market.chain,
+                    "protocol": market.protocol,
+                    "market": market.address,
+                    "market_name": market.name,
+                    "borrower": s.borrower,
+                    "first_seen_at": now,
+                    "last_seen_at": now,
+                    "observations": 1,
+                    "min_health_factor": _clamp_hf(s.health_factor),
+                    "max_debt_usd": s.debt_usd,
+                    "best_net_profit_usd": s.est_net_profit_usd,
+                    "best_gross_profit_usd": s.est_gross_profit_usd,
+                    "closed": False,
+                }
+                for s in {s.borrower: s for s in sightings}.values()
+            ]
+            base = insert(SightingRow).values(rows)
+            current = SightingRow.__table__.c
+            stmt = base.on_conflict_do_update(
+                index_elements=["chain", "protocol", "market", "borrower"],
+                index_where=text("NOT closed"),
+                set_={
+                    "last_seen_at": base.excluded.last_seen_at,
+                    "observations": current.observations + 1,
+                    # PostgreSQL LEAST/GREATEST ignore NULLs.
+                    "min_health_factor": func.least(
+                        current.min_health_factor, base.excluded.min_health_factor
+                    ),
+                    "max_debt_usd": func.greatest(current.max_debt_usd, base.excluded.max_debt_usd),
+                    "best_net_profit_usd": func.greatest(
+                        current.best_net_profit_usd, base.excluded.best_net_profit_usd
+                    ),
+                    "best_gross_profit_usd": func.greatest(
+                        current.best_gross_profit_usd, base.excluded.best_gross_profit_usd
+                    ),
+                },
+            )
+            await session.execute(stmt)
+
+    async def first_seen(
+        self, market: MarketRef, borrower: str, at: datetime, gap_seconds: int
+    ) -> datetime | None:
+        """Start of the episode that was ongoing at `at` (open, or seen within the gap)."""
+        stmt = (
+            select(SightingRow.first_seen_at)
+            .where(
+                SightingRow.chain == market.chain,
+                SightingRow.protocol == market.protocol,
+                SightingRow.market == market.address,
+                SightingRow.borrower == borrower,
+                SightingRow.first_seen_at <= at,
+                or_(
+                    SightingRow.closed.is_(False),
+                    SightingRow.closed_reason == "liquidated",
+                    SightingRow.last_seen_at >= at - timedelta(seconds=gap_seconds),
+                ),
+            )
+            .order_by(SightingRow.first_seen_at.desc())
+            .limit(1)
+        )
+        async with self._sessions() as session:
+            result: datetime | None = await session.scalar(stmt)
+            return result
+
+    async def close(
+        self, market: MarketRef, borrower: str, reason: str, started_before: datetime
+    ) -> None:
+        """Close the open episode of a borrower that started before `started_before`."""
+        stmt = (
+            update(SightingRow)
+            .where(
+                SightingRow.chain == market.chain,
+                SightingRow.protocol == market.protocol,
+                SightingRow.market == market.address,
+                SightingRow.borrower == borrower,
+                SightingRow.closed.is_(False),
+                SightingRow.first_seen_at <= started_before,
+            )
+            .values(closed=True, closed_reason=reason)
+        )
+        async with self._sessions.begin() as session:
+            await session.execute(stmt)
+
+
+class SqlUptimeRepository:
+    """`IUptimeRepository`: minute buckets in which the watcher processed blocks."""
+
+    def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
+        self._sessions = sessions
+
+    async def mark(self, chain: str, minute: datetime) -> None:
+        """Record that the watcher was alive on `chain` during `minute` (idempotent)."""
+        bucket = minute.replace(second=0, microsecond=0)
+        stmt = insert(UptimeRow).values(chain=chain, minute=bucket).on_conflict_do_nothing()
+        async with self._sessions.begin() as session:
+            await session.execute(stmt)
+
+    async def was_online(self, chain: str, at: datetime) -> bool:
+        """True if the watcher was alive on `chain` in the minute of `at` or the one before."""
+        bucket = at.replace(second=0, microsecond=0)
+        stmt = select(func.count()).where(
+            UptimeRow.chain == chain,
+            UptimeRow.minute.in_((bucket, bucket - timedelta(minutes=1))),
+        )
+        async with self._sessions() as session:
+            return bool(await session.scalar(stmt))
+
+
+def _clamp_hf(value: Decimal | None) -> Decimal | None:
+    return None if value is None else min(value, MAX_STORED_HF)
+
+
+def _max_optional(current: Decimal | None, new: Decimal | None) -> Decimal | None:
+    if new is None:
+        return current
+    return new if current is None or new > current else current

@@ -108,9 +108,12 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress
 - [ ] Deferred V1 audit findings → tracked in **2.7** below (must be done before live execution)
 
 ### 1.13 Market measurement (data for the V2 go/no-go decision)
-- [ ] Index `LiquidationCall` (Aave) / `AbsorbCollateral` + `BuyCollateral` (Comet) events: who liquidated, size, bonus captured, gas paid
-- [ ] For each liquidation: blocks between "became liquidatable" (our first detection) and execution → competition latency
-- [ ] Monthly report: addressable profit pool per chain/protocol, share captured by top liquidators, our detection lead/lag
+- [x] Index `LiquidationCall` (Aave) and `AbsorbDebt` / `AbsorbCollateral` / `BuyCollateral` (Comet): a separate checkpointed `liquidations` stream (30-day backfill, then follow)
+- [x] Enrich each event: tx sender and liquidator contract, gas + L1 fee, tx index, USD value at the block's oracle prices, gross/net profit
+- [x] Lag: binary search over archive state for the block a position became liquidatable → blocks/seconds until a competitor liquidated it (0 = same-block back-run)
+- [x] Our sightings of liquidatable positions (any size) + watcher uptime per minute → seen first? lead time? offline vs missed?
+- [x] `make market-report DAYS=N` → Markdown / JSON / CSV in `data/market/`; hourly Telegram status shows market liquidations
+- [ ] After 2–4 weeks of running locally: analyse `data/market/` (competitor share & speed, our lead, addressable pool) → V2 go/no-go
 
 ---
 

@@ -59,6 +59,9 @@ def test_beat_schedule_per_chain() -> None:
         "scan-full-base",
         "index-optimism",
         "scan-full-optimism",
+        "market-index-base",
+        "market-index-optimism",
+        "market-enrich",
         "status-report",
     }
     assert schedule["status-report"]["schedule"] == 3600.0  # hourly by default

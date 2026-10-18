@@ -28,6 +28,19 @@ def build_beat_schedule(settings: SchedulerSettings) -> dict[str, dict[str, Any]
             "args": (chain,),
             "options": {"queue": "scan", "expires": settings.scan_interval_seconds},
         }
+    if settings.market_enabled:
+        for chain in settings.enabled_chains:
+            schedule[f"market-index-{chain}"] = {
+                "task": "aegis.market.index",
+                "schedule": float(settings.market_index_interval_seconds),
+                "args": (chain,),
+                "options": {"queue": "market", "expires": settings.market_index_interval_seconds},
+            }
+        schedule["market-enrich"] = {
+            "task": "aegis.market.enrich",
+            "schedule": float(settings.market_enrich_interval_seconds),
+            "options": {"queue": "market", "expires": settings.market_enrich_interval_seconds},
+        }
     if settings.status_report_interval_hours > 0:
         interval = settings.status_report_interval_hours * 3600
         schedule["status-report"] = {
@@ -50,7 +63,12 @@ def create_celery_app(settings: SchedulerSettings) -> Celery:
         timezone="UTC",
         enable_utc=True,
         task_default_queue="scan",
-        task_routes={"aegis.scan.*": {"queue": "scan"}, "aegis.notify.*": {"queue": "notify"}},
+        task_routes={
+            "aegis.scan.*": {"queue": "scan"},
+            "aegis.notify.*": {"queue": "notify"},
+            # Market measurement (backfill can run for long): own worker, never blocks scans.
+            "aegis.market.*": {"queue": "market"},
+        },
         task_acks_late=True,
         task_reject_on_worker_lost=True,
         worker_prefetch_multiplier=1,

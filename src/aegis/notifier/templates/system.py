@@ -86,6 +86,9 @@ def render_status(report: StatusReport) -> str:
         SEPARATOR,
         f"🔎 <b>Opportunities:</b> {activity.opportunities}{best}",
         f"📨 <b>Alerts sent:</b> {activity.alerts_sent}{failed}",
+        f"🏁 <b>Market liquidations:</b> {activity.market_liquidations}"
+        f" · liquidators earned {esc(usd(activity.market_gross_usd))}"
+        f" · seen by us first: {activity.market_seen_first}",
         f"💓 <b>Last scan:</b> {scan}",
         "<blockquote>"
         f"Tracking {borrowers} borrowers with {esc(compact_usd(debt))} of debt; "

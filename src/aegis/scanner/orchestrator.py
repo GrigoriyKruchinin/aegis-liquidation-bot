@@ -18,10 +18,11 @@ from aegis.core.interfaces import (
     IndexResult,
     INotificationDispatcher,
     IOpportunityRepository,
+    ISightingRepository,
     ScanResult,
 )
 from aegis.core.logging import get_logger
-from aegis.core.models import OpportunitySummary
+from aegis.core.models import OpportunitySummary, Sighting
 from aegis.core.redact import safe_error
 
 ScanMode = Literal["full", "watchlist"]
@@ -53,6 +54,8 @@ class ScanOrchestrator:
         *,
         min_profit_usd: Decimal,
         watchlist_hf_threshold: Decimal,
+        sightings: ISightingRepository | None = None,
+        liquidation_indexer: IBorrowerIndexer | None = None,
     ) -> None:
         self._markets = markets
         self._indexer = indexer
@@ -63,6 +66,8 @@ class ScanOrchestrator:
         self._dispatcher = dispatcher
         self._min_profit = min_profit_usd
         self._watchlist_hf = watchlist_hf_threshold
+        self._sightings = sightings
+        self._liquidation_indexer = liquidation_indexer
 
     @property
     def chains(self) -> list[str]:
@@ -92,6 +97,14 @@ class ScanOrchestrator:
         """Discover new borrowers on all markets of `chain`."""
         return await self._for_each_market(chain, "index", self._indexer.sync)
 
+    async def index_liquidations(self, chain: str) -> list[IndexResult]:
+        """Index liquidation activity (market measurement) on all markets of `chain`."""
+        if self._liquidation_indexer is None:
+            return []
+        return await self._for_each_market(
+            chain, "index_liquidations", self._liquidation_indexer.sync
+        )
+
     async def scan_chain(self, chain: str, mode: ScanMode) -> list[ScanResult]:
         """Scan all markets of `chain` (`full` = all active borrowers, `watchlist` = low HF)."""
 
@@ -119,7 +132,30 @@ class ScanOrchestrator:
         result = await self._scanner.scan(protocol, borrowers)
         for opportunity in result.opportunities:
             await self._handle(OpportunitySummary.from_opportunity(opportunity))
+        await self._record_sightings(protocol, result)  # after alerts: never delays them
         return result
+
+    async def _record_sightings(self, protocol: BaseLendingProtocol, result: ScanResult) -> None:
+        """Remember every liquidatable account we saw (market analysis), never blocking alerts."""
+        if self._sightings is None or not (result.liquidatable_checks or result.healthy):
+            return
+        estimates = {o.position.borrower.lower(): o.estimate for o in result.opportunities}
+        sightings: list[Sighting] = []
+        for check in result.liquidatable_checks:
+            estimate = estimates.get(check.borrower.lower())
+            sightings.append(
+                Sighting(
+                    borrower=check.borrower,
+                    health_factor=check.health_factor,
+                    debt_usd=check.debt_usd,
+                    est_net_profit_usd=estimate.net_profit_usd if estimate else None,
+                    est_gross_profit_usd=estimate.quote.gross_profit_usd if estimate else None,
+                )
+            )
+        try:
+            await self._sightings.record(protocol.market, sightings, result.healthy)
+        except AegisError as exc:
+            logger.warning("sightings_failed", market=protocol.market.key, error=safe_error(exc))
 
     async def _handle(self, summary: OpportunitySummary) -> None:
         log = logger.bind(

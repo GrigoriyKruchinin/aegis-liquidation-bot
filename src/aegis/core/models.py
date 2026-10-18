@@ -78,10 +78,10 @@ class LogEntry:
 
 @dataclass(frozen=True, slots=True)
 class LogFilter:
-    """Event filter used for borrower discovery."""
+    """Event filter. A tuple in a topic position means "any of" (OR)."""
 
     address: str
-    topics: tuple[bytes | None, ...]
+    topics: tuple[bytes | tuple[bytes, ...] | None, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -303,6 +303,12 @@ class ActivityStats:
     best_net_profit_usd: Decimal | None
     alerts_sent: int
     alerts_failed: int
+    #: Liquidations executed by anyone in the period (Aave liquidationCall + Comet absorb).
+    market_liquidations: int = 0
+    #: Profit realised by liquidators in the period (Aave + Comet buyCollateral, before gas).
+    market_gross_usd: Decimal = Decimal(0)
+    #: Of `market_liquidations`, how many our bot had seen liquidatable beforehand.
+    market_seen_first: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -314,3 +320,114 @@ class StatusReport:
     markets: tuple[MarketStatus, ...]
     activity: ActivityStats
     last_scan_age_seconds: int | None
+
+
+#: Kinds of on-chain liquidation activity recorded for market analysis.
+LIQUIDATION_KINDS = ("aave_liquidation", "comet_absorb", "comet_absorb_collateral", "comet_buy")
+
+
+@dataclass(frozen=True, slots=True)
+class LiquidationEvent:
+    """A liquidation-related event decoded from a protocol log (raw, before enrichment).
+
+    Attributes:
+        kind: One of `LIQUIDATION_KINDS`.
+        borrower: Liquidated account (`None` for Comet `BuyCollateral`).
+        liquidator: Address credited by the protocol (Aave `liquidator`, Comet absorber/buyer).
+        debt_amount: Debt repaid / absorbed / base paid, in base units of `debt_asset`.
+        collateral_amount: Collateral seized / absorbed / bought, in base units.
+        usd_value_hint: USD value reported by the protocol itself (Comet), if any.
+    """
+
+    market: MarketRef
+    kind: str
+    tx_hash: str
+    log_index: int
+    block_number: int
+    borrower: str | None
+    liquidator: str
+    debt_asset: str | None
+    collateral_asset: str | None
+    debt_amount: int
+    collateral_amount: int
+    usd_value_hint: Decimal | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class EventValuation:
+    """USD valuation of a liquidation event at its block."""
+
+    debt_usd: Decimal
+    collateral_usd: Decimal
+
+    @property
+    def gross_profit_usd(self) -> Decimal:
+        """What the liquidator received above what it paid (before gas)."""
+        return self.collateral_usd - self.debt_usd
+
+
+@dataclass(frozen=True, slots=True)
+class TxReceiptInfo:
+    """Execution details of the liquidating transaction."""
+
+    tx_from: str
+    tx_to: str | None
+    tx_index: int
+    gas_used: int
+    effective_gas_price: int
+    l1_fee: int
+    status: int
+    block_timestamp: int
+    logs_in_tx: int
+    #: topic0 of every log in the transaction (to split gas between liquidations in one tx).
+    log_topic0s: tuple[bytes, ...] = ()
+
+    @property
+    def total_fee_wei(self) -> int:
+        """L2 execution fee plus the OP-stack L1 data fee (Arbitrum folds it into gas)."""
+        return self.gas_used * self.effective_gas_price + self.l1_fee
+
+
+@dataclass(frozen=True, slots=True)
+class Sighting:
+    """Our bot saw a borrower liquidatable (regardless of the profit threshold)."""
+
+    borrower: str
+    health_factor: Decimal | None
+    debt_usd: Decimal
+    est_net_profit_usd: Decimal | None
+    est_gross_profit_usd: Decimal | None
+
+
+@dataclass(frozen=True, slots=True)
+class EventEnrichment:
+    """Everything learned about a liquidation event after it was indexed."""
+
+    block_time: datetime
+    receipt: TxReceiptInfo
+    valuation: EventValuation | None
+    gas_cost_usd: Decimal | None
+    debt_symbol: str | None
+    collateral_symbol: str | None
+    liquidatable_since_block: int | None
+    lag_blocks: int | None
+    lag_capped: bool | None
+    our_first_seen_at: datetime | None
+    bot_online: bool | None
+    borrower_known: bool | None
+    follow_up: bool = False
+    data_gaps: str | None = None
+
+    @property
+    def net_profit_usd(self) -> Decimal | None:
+        """Gross profit minus this event's share of the transaction fee."""
+        if self.valuation is None or self.gas_cost_usd is None:
+            return None
+        return self.valuation.gross_profit_usd - self.gas_cost_usd
+
+    @property
+    def our_lead_seconds(self) -> Decimal | None:
+        """How long before the liquidation our bot first saw the position liquidatable."""
+        if self.our_first_seen_at is None:
+            return None
+        return Decimal(str((self.block_time - self.our_first_seen_at).total_seconds()))

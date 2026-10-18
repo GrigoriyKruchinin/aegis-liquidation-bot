@@ -54,6 +54,7 @@ compete for it. **Aegis** is built to win that race on L2s. Its job breaks into 
 | 💰 **Accurate profit** | Liquidation bonus minus gas. Gas covers L2 execution plus the L1 data fee (OP-stack `GasPriceOracle`, Arbitrum `NodeInterface`) and is priced in USD with Chainlink. All money math uses `int` wei and `Decimal`, never `float` |
 | 🔎 **Borrower indexer** | Checkpointed `eth_getLogs` indexing with adaptive chunk sizes and reorg safety |
 | 📦 **Batched reads** | Multicall3 everywhere: thousands of positions checked in a few RPC calls |
+| 🏁 **Competitor analysis** | Indexes every liquidation on the monitored markets: who did it, the profit after gas, the transaction position, and **how many blocks after the position became liquidatable** it was taken. Compares this with what our bot saw, to estimate our real chance before investing in V2 |
 | 🚦 **RPC budget** | A Redis token bucket shared by all services keeps usage under the provider's compute-unit limit, with a reserved share for the watcher |
 | 📨 **Telegram** | HTML alerts for every opportunity, a startup message and an hourly status report |
 | 🐳 **Dockerized** | One `make up-local`: Postgres, Redis, migrations, Celery workers, the watcher and beat, with healthchecks and a strict start order |
@@ -163,6 +164,28 @@ The detailed checklist is in [`todo.md`](todo.md).
    - **Gas:** protocol gas baseline × gas price (+20% margin) + L1 data fee. The L1 fee comes from the OP-stack `GasPriceOracle` on Base/Optimism and from `NodeInterface.gasEstimateL1Component` on Arbitrum. It is priced in USD with Chainlink ETH/USD.
 5. **Alert.** If net profit ≥ `MIN_PROFIT_USD`, the opportunity is stored and the alert is queued. Redis prevents a repeat alert for the same borrower within `ALERT_DEDUP_TTL_SECONDS`.
 
+## Market & competitor analysis
+
+V1 is also a measurement tool. Before spending money on V2 infrastructure, it answers four questions: how big the opportunity really is, how fast competitors are, and whether we would have been first.
+
+- **Liquidation index.** A separate checkpointed event stream records Aave `LiquidationCall` and Comet `AbsorbDebt` / `AbsorbCollateral` / `BuyCollateral` events. On first start it backfills `MARKET_LOOKBACK_DAYS` and then follows the chain.
+- **Enrichment.** Each event is enriched with:
+  - the transaction sender and the liquidator contract;
+  - gas, including the L1 data fee, and the transaction position in the block;
+  - USD values at oracle prices of that block, and the liquidator's gross and net profit.
+
+  A binary search over historical state then finds **when the position became liquidatable**. A lag of 0 blocks means it was taken in the very block it became liquidatable: a back-run of the price update.
+- **Our sightings.** Every liquidatable position our bot sees is recorded, even below the alert threshold. The watcher also records which minutes it was online, so "missed" and "offline" stay distinct. This matters when running on a laptop.
+- **Report.** `make market-report DAYS=14` writes `data/market/report.md`, `report.json`, `liquidations.csv` and `sightings.csv`, which are git-ignored. The report covers:
+  - uptime;
+  - liquidations and profit per market, and the profit distribution;
+  - the top competitors with their share, speed and gas;
+  - lag buckets;
+  - our visibility (known borrower, seen first, lead time);
+  - the addressable pool projected to 30 days.
+
+The hourly Telegram status also shows the number of market liquidations and how much liquidators earned.
+
 ## Quickstart
 
 Requirements: Docker with Compose v2, an [Alchemy](https://dashboard.alchemy.com) key with Base,
@@ -181,7 +204,7 @@ make down-local
 The services start in a strict order:
 1. `postgres` and `redis` become healthy.
 2. `migrate` runs `alembic upgrade head` and exits.
-3. `scanner` and `notifier-worker` start and pass `celery inspect ping`.
+3. `scanner`, `notifier-worker` and `market-worker` start and pass `celery inspect ping`.
 4. `watcher` and `celery-beat` start. Each is reported healthy once it writes a heartbeat.
 
 When the scanner is ready, it posts **🟢 Aegis scanner online** to Telegram. Every `STATUS_REPORT_INTERVAL_HOURS` it also posts a **📊 Aegis status** report. The report shows tracked borrowers and their debt, positions close to liquidation, indexer progress, and the opportunities and alerts of the period, so you can tell the bot is alive even when no liquidations occur.
@@ -205,7 +228,8 @@ src/aegis/
   reporting/   periodic status report
   workers/     Celery app and tasks, watcher service, Redis tools, healthchecks
   db/          SQLAlchemy models, repositories, session factory
-  tools/       operational CLIs (rpc_latency)
+  market/      liquidation event stream, enrichment (gas, USD, lag search), coverage
+  tools/       operational CLIs (rpc_latency, market_report)
 migrations/    Alembic
 docs/assets/   images used by the documentation
 tests/         unit (default) and integration (RUN_INTEGRATION=1)
@@ -254,6 +278,9 @@ All settings come from environment variables or `.env`. See [`.env.example`](.en
 | `STATUS_REPORT_INTERVAL_HOURS` | `1` | Periodic 📊 status report to Telegram (`0` disables it) |
 | `RPC_TIMEOUT_SECONDS` / `RPC_MAX_RETRIES` / `RPC_MAX_CONCURRENCY` | `15` / `3` / `8` | RPC resilience |
 | `RPC_CU_PER_SECOND` | `300` | Shared throughput budget per provider key, in compute units/s, across all chains and services. It is enforced with a Redis token bucket and prevents HTTP 429. Set it to about 80% of your plan's CUPS; `0` disables it |
+| `MARKET_ENABLED` / `MARKET_LOOKBACK_DAYS` | `true` / `30` | Competitor-analysis indexing and its first-run backfill window |
+| `MARKET_INDEX_INTERVAL_SECONDS` / `MARKET_ENRICH_INTERVAL_SECONDS` | `300` / `120` | How often new liquidations are indexed and enriched |
+| `MARKET_LAG_WINDOW_MINUTES` | `120` | How far back the archive search looks for the start of a liquidatable window |
 | `RPC_RESERVE_PCT` | `30` | Share of the budget reserved for the watcher. The indexer and scheduled scans use the rest, so a backfill never slows down detection |
 | `POSTGRES_*`, `REDIS_URL` | local defaults | Overridden by docker-compose for containers |
 
@@ -262,7 +289,7 @@ All settings come from environment variables or `.env`. See [`.env.example`](.en
 - Secrets are `SecretStr` values. RPC URLs and bot tokens are redacted from all logs and errors.
 - `.env` is git-ignored. `.env.example` holds placeholders only.
 - Containers run as a non-root user. Postgres is published only on `127.0.0.1:5433`.
-- Least privilege in compose: only `scanner`, `notifier-worker` and `watcher` receive the full `.env`. `postgres`, `migrate` and `celery-beat` get only the variables they need (`DatabaseSettings` / `SchedulerSettings`).
+- Least privilege in compose: only `scanner`, `notifier-worker`, `market-worker` and `watcher` receive the full `.env`. `postgres`, `migrate` and `celery-beat` get only the variables they need (`DatabaseSettings` / `SchedulerSettings`).
 - V1 never loads a private key. V2 adds execution behind a hard `ALLOW_FLASH_LOANS` toggle, with mandatory `eth_call` simulation before every transaction.
 
 ## Disclaimer

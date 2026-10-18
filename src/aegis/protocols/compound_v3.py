@@ -11,6 +11,10 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
+from functools import partial
+
+from eth_abi.abi import decode as abi_decode
+from eth_abi.exceptions import DecodingError
 
 from aegis.config.chains import ChainConfig, CometMarketConfig
 from aegis.core.abi import AbiFunction, checksum, event_topic, topic_to_address
@@ -24,7 +28,9 @@ from aegis.core.models import (
     CallResult,
     CollateralLeg,
     DebtLeg,
+    EventValuation,
     HealthCheck,
+    LiquidationEvent,
     LiquidationQuote,
     LogEntry,
     LogFilter,
@@ -56,6 +62,14 @@ ABSORB = AbiFunction("absorb(address,address[])", ())
 
 # Withdraw(address indexed src, address indexed to, uint256 amount) — base withdrawals/borrows.
 WITHDRAW_TOPIC = event_topic("Withdraw(address,address,uint256)")
+# AbsorbDebt(address indexed absorber, address indexed borrower, uint basePaidOut, uint usdValue)
+ABSORB_DEBT_TOPIC = event_topic("AbsorbDebt(address,address,uint256,uint256)")
+# AbsorbCollateral(address indexed absorber, address indexed borrower, address indexed asset,
+#                  uint collateralAbsorbed, uint usdValue)
+ABSORB_COLLATERAL_TOPIC = event_topic("AbsorbCollateral(address,address,address,uint256,uint256)")
+# BuyCollateral(address indexed buyer, address indexed asset,
+#               uint baseAmount, uint collateralAmount)
+BUY_COLLATERAL_TOPIC = event_topic("BuyCollateral(address,address,uint256,uint256)")
 
 PRICE_SCALE = Decimal(10**8)
 ABSORB_GAS_UNITS = 250_000
@@ -377,6 +391,139 @@ class CompoundV3Protocol(BaseLendingProtocol):
             decoded = decode_result(GET_PRICE, result)
             prices.append(int(decoded[0]) if decoded else 0)
         return tuple(prices)
+
+    # --- Market measurement ------------------------------------------------------------------
+
+    def _asset(self, address: str | None) -> CometAsset | None:
+        if address is None:
+            return None
+        wanted = address.lower()
+        return next((a for a in self._assets if a.asset.address.lower() == wanted), None)
+
+    def asset_symbol(self, address: str | None) -> str | None:
+        """Symbol of the base or a collateral asset."""
+        if address is not None and self._base and address.lower() == self._base.address.lower():
+            return self._base.symbol
+        asset = self._asset(address)
+        return asset.asset.symbol if asset else None
+
+    def gas_bearing_topics(self) -> frozenset[bytes]:
+        """Absorb and buy are paid actions; AbsorbCollateral is a by-product of an absorb."""
+        return frozenset({ABSORB_DEBT_TOPIC, BUY_COLLATERAL_TOPIC})
+
+    def liquidation_filter(self) -> LogFilter:
+        """Absorptions and collateral purchases of this Comet."""
+        return LogFilter(
+            address=self._comet,
+            topics=((ABSORB_DEBT_TOPIC, ABSORB_COLLATERAL_TOPIC, BUY_COLLATERAL_TOPIC),),
+        )
+
+    def decode_liquidation(self, log: LogEntry) -> LiquidationEvent | None:
+        """Decode AbsorbDebt / AbsorbCollateral / BuyCollateral."""
+        if not log.topics:
+            return None
+        topic = log.topics[0]
+        try:
+            first, second = abi_decode(["uint256", "uint256"], log.data)
+        except (DecodingError, ValueError):
+            return None
+        common = partial(
+            LiquidationEvent,
+            market=self.market,
+            tx_hash=log.tx_hash,
+            log_index=log.log_index,
+            block_number=log.block_number,
+        )
+        base = self._base.address if self._base else None
+        if topic == ABSORB_DEBT_TOPIC and len(log.topics) >= 3:
+            return common(
+                kind="comet_absorb",
+                borrower=topic_to_address(log.topics[2]),
+                liquidator=topic_to_address(log.topics[1]),
+                debt_asset=base,
+                collateral_asset=None,
+                debt_amount=int(first),
+                collateral_amount=0,
+                usd_value_hint=Decimal(int(second)) / PRICE_SCALE,
+            )
+        if topic == ABSORB_COLLATERAL_TOPIC and len(log.topics) >= 4:
+            return common(
+                kind="comet_absorb_collateral",
+                borrower=topic_to_address(log.topics[2]),
+                liquidator=topic_to_address(log.topics[1]),
+                debt_asset=base,
+                collateral_asset=topic_to_address(log.topics[3]),
+                debt_amount=0,
+                collateral_amount=int(first),
+                usd_value_hint=Decimal(int(second)) / PRICE_SCALE,
+            )
+        if topic == BUY_COLLATERAL_TOPIC and len(log.topics) >= 3:
+            return common(
+                kind="comet_buy",
+                borrower=None,
+                liquidator=topic_to_address(log.topics[1]),
+                debt_asset=base,
+                collateral_asset=topic_to_address(log.topics[2]),
+                debt_amount=int(first),
+                collateral_amount=int(second),
+            )
+        return None
+
+    async def _usd_multiplier(self, block: int | None = None) -> Decimal:
+        """Comet prices are in the native token for native-denominated markets (e.g. cWETHv3)."""
+        if self._denomination != "native":
+            return Decimal(1)
+        if block is None:
+            return await self._native_oracle.native_price_usd()
+        return await self._native_oracle.native_price_usd_at(block)
+
+    async def value_liquidation(self, event: LiquidationEvent) -> EventValuation | None:
+        """USD value at the event's block.
+
+        - absorb: the protocol takes over the debt; the absorber earns nothing directly.
+        - absorbed collateral: potential profit of buyers = value x storefront discount.
+        - buy: collateral value minus base paid, at the block's Comet prices.
+        """
+        multiplier = await self._usd_multiplier(event.block_number)
+        if event.kind == "comet_absorb" and event.usd_value_hint is not None:
+            value = event.usd_value_hint * multiplier
+            return EventValuation(debt_usd=value, collateral_usd=value)
+        asset = self._asset(event.collateral_asset)
+        if event.kind == "comet_absorb_collateral" and event.usd_value_hint is not None:
+            value = event.usd_value_hint * multiplier
+            discount = (
+                collateral_discount(self._store_front, asset.liquidation_factor)
+                if asset
+                else Decimal(0)
+            )
+            return EventValuation(debt_usd=value * (1 - discount), collateral_usd=value)
+        if event.kind == "comet_buy" and asset is not None and self._base_feed is not None:
+            results = await self._provider.multicall(
+                [
+                    Call(self._comet, GET_PRICE.encode(self._base_feed)),
+                    Call(self._comet, GET_PRICE.encode(asset.price_feed)),
+                ],
+                event.block_number,
+            )
+            base_raw = decode_result(GET_PRICE, results[0])
+            asset_raw = decode_result(GET_PRICE, results[1])
+            if base_raw is None or asset_raw is None:
+                return None
+            base_price = Decimal(int(base_raw[0])) / PRICE_SCALE * multiplier
+            asset_price = Decimal(int(asset_raw[0])) / PRICE_SCALE * multiplier
+            return EventValuation(
+                debt_usd=to_units(event.debt_amount, self.base.decimals) * base_price,
+                collateral_usd=to_units(event.collateral_amount, asset.asset.decimals)
+                * asset_price,
+            )
+        return None
+
+    async def is_liquidatable_at(self, borrower: str, block: int) -> bool | None:
+        """`isLiquidatable` at the end of `block` (needs historical state)."""
+        raw = await self._provider.call(
+            self._comet, IS_LIQUIDATABLE.encode(checksum(borrower)), block
+        )
+        return bool(IS_LIQUIDATABLE.decode(raw)[0])
 
 
 @PROTOCOLS.register(PROTOCOL_NAME)

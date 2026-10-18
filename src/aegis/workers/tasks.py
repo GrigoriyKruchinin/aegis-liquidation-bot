@@ -78,6 +78,34 @@ def index_chain(chain: str) -> dict[str, Any]:
     return _locked_scan(chain, "index", 15 * 60, None)
 
 
+@app.task(name="aegis.market.index", ignore_result=True)
+def market_index(chain: str) -> dict[str, Any]:
+    """Index competitors' liquidation events on `chain`."""
+
+    async def body(c: Container) -> dict[str, Any]:
+        async with c.locks.hold(f"market_index:{chain}", 30 * 60) as acquired:
+            if not acquired:
+                return {"skipped": "already running"}
+            results = await c.orchestrator.index_liquidations(chain)
+            return {"events": sum(r.discovered for r in results)}
+
+    return runtime.run(body)
+
+
+@app.task(name="aegis.market.enrich", ignore_result=True)
+def market_enrich() -> dict[str, Any]:
+    """Enrich pending liquidation events (receipts, USD value, latency, our coverage)."""
+
+    async def body(c: Container) -> dict[str, Any]:
+        async with c.locks.hold("market_enrich", 30 * 60) as acquired:
+            if not acquired:
+                return {"skipped": "already running"}
+            done = await c.enricher.enrich_pending(c.settings.market_enrich_batch)
+            return {"enriched": done}
+
+    return runtime.run(body)
+
+
 @app.task(name="aegis.scan.full", ignore_result=True)
 def scan_full(chain: str) -> dict[str, Any]:
     """Health-check every active borrower on `chain`."""

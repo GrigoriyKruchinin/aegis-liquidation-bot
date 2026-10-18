@@ -18,6 +18,7 @@ from aegis.core.models import (
     LogFilter,
     MarketRef,
     OpportunitySummary,
+    TxReceiptInfo,
     TxTemplate,
 )
 
@@ -37,6 +38,7 @@ class FakeProvider(BaseChainProvider):
         self.get_logs_calls: list[tuple[int, int]] = []
         self.max_log_range: int | None = None
         self.logs_down = False
+        self.receipts: dict[str, TxReceiptInfo] = {}
         self.gas_price_calls = 0
         self.l1_fee_calls = 0
 
@@ -75,16 +77,27 @@ class FakeProvider(BaseChainProvider):
             raise RpcError("all endpoints failed")
         if self.max_log_range is not None and to_block - from_block + 1 > self.max_log_range:
             raise LogRangeTooLargeError("range too large")
+        wanted = log_filter.topics[0] if log_filter.topics else None
+        topic0s = {wanted} if isinstance(wanted, bytes) else set(wanted or ())
         return [
             log
             for log in self.logs
             if from_block <= log.block_number <= to_block
             and log.address.lower() == log_filter.address.lower()
+            and (not topic0s or (log.topics and log.topics[0] in topic0s))
         ]
 
     async def l1_data_fee(self, tx: TxTemplate) -> int:
         self.l1_fee_calls += 1
         return self.l1_fee_wei
+
+    async def transaction_receipt(self, tx_hash: str) -> TxReceiptInfo:
+        receipt = self.receipts.get(tx_hash)
+        if receipt is None:
+            from aegis.core.errors import RpcError
+
+            raise RpcError(f"unknown tx {tx_hash}")
+        return receipt
 
 
 @dataclass
@@ -92,6 +105,9 @@ class FakeOracle:
     price: Decimal = Decimal(2000)
 
     async def native_price_usd(self) -> Decimal:
+        return self.price
+
+    async def native_price_usd_at(self, block: int) -> Decimal:
         return self.price
 
 
@@ -153,11 +169,11 @@ class MemoryBorrowerRepository:
 class MemoryCheckpointRepository:
     blocks: dict[str, int] = field(default_factory=dict)
 
-    async def get(self, market: MarketRef) -> int | None:
-        return self.blocks.get(market.key)
+    async def get(self, market: MarketRef, stream: str = "borrowers") -> int | None:
+        return self.blocks.get(market.key if stream == "borrowers" else f"{market.key}#{stream}")
 
-    async def set(self, market: MarketRef, block: int) -> None:
-        self.blocks[market.key] = block
+    async def set(self, market: MarketRef, block: int, stream: str = "borrowers") -> None:
+        self.blocks[market.key if stream == "borrowers" else f"{market.key}#{stream}"] = block
 
 
 @dataclass

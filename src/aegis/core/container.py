@@ -27,19 +27,24 @@ from aegis.core.interfaces import (
 from aegis.db.repositories import (
     SqlBorrowerRepository,
     SqlCheckpointRepository,
+    SqlLiquidationEventRepository,
     SqlNotificationRepository,
     SqlOpportunityRepository,
+    SqlSightingRepository,
     SqlStatusRepository,
+    SqlUptimeRepository,
 )
 from aegis.db.session import create_engine, create_session_factory
 from aegis.estimator.gas import L2GasEstimator
 from aegis.estimator.oracle import ChainlinkNativePriceOracle
 from aegis.estimator.profit import ProfitEstimator
+from aegis.market.enricher import MarketEnricher, index_markets
+from aegis.market.stream import LiquidationStream
 from aegis.notifier.telegram import TelegramNotifier
 from aegis.protocols import PROTOCOLS, ProtocolDeps
 from aegis.reporting.status import StatusReporter
 from aegis.scanner.health import HealthFactorScanner
-from aegis.scanner.indexer import EventBorrowerIndexer
+from aegis.scanner.indexer import EventBorrowerIndexer, EventIndexer
 from aegis.scanner.orchestrator import ScanOrchestrator
 from aegis.workers.redis_tools import (
     RedisAlertDeduplicator,
@@ -110,6 +115,8 @@ class Container:
     locks: RedisTaskLock
     deduplicator: RedisAlertDeduplicator
     status_reporter: StatusReporter
+    enricher: MarketEnricher
+    uptime: SqlUptimeRepository
     closed: bool = field(default=False)
 
     @classmethod
@@ -166,6 +173,16 @@ class Container:
                 for name, estimator in estimators.items()
             }
         )
+        events = SqlLiquidationEventRepository(sessions)
+        sightings = SqlSightingRepository(sessions)
+        uptime = SqlUptimeRepository(sessions)
+        liquidation_indexer = EventIndexer(
+            checkpoints,
+            LiquidationStream(events),
+            lookback_days=settings.market_lookback_days,
+            chunk_blocks=settings.market_log_chunk_blocks,
+            max_blocks_per_run=settings.market_max_blocks_per_run,
+        )
         orchestrator = ScanOrchestrator(
             markets,
             indexer,
@@ -176,6 +193,17 @@ class Container:
             dispatcher_factory(),
             min_profit_usd=settings.min_profit_usd,
             watchlist_hf_threshold=settings.watchlist_hf_threshold,
+            sightings=sightings if settings.market_enabled else None,
+            liquidation_indexer=liquidation_indexer if settings.market_enabled else None,
+        )
+        enricher = MarketEnricher(
+            index_markets(markets),
+            oracles,
+            events,
+            sightings,
+            uptime,
+            lag_window_seconds=settings.market_lag_window_minutes * 60,
+            lag_min_gross_usd=settings.market_lag_min_gross_usd,
         )
         return cls(
             settings=settings,
@@ -190,6 +218,8 @@ class Container:
             notifications=SqlNotificationRepository(sessions),
             locks=RedisTaskLock(redis),
             deduplicator=deduplicator,
+            enricher=enricher,
+            uptime=uptime,
             status_reporter=StatusReporter(
                 markets,
                 SqlStatusRepository(sessions),
