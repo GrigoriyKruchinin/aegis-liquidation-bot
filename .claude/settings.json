@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv run ruff:*)",
+      "Bash(uv run mypy:*)",
+      "Bash(uv run pytest:*)",
+      "Bash(uv run bandit:*)",
+      "Bash(uv run pip-audit:*)",
+      "Bash(make lint)",
+      "Bash(make typecheck)",
+      "Bash(make test:*)",
+      "Bash(make format)",
+      "Bash(make format-check)",
+      "Bash(make check)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*.local)"
+    ]
+  }
+}
