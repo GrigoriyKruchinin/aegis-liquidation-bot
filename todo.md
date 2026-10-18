@@ -107,12 +107,19 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress
 - [x] `/audit-security` pass on V1 — no CRITICAL; fixed: HIGH-1 Aave eMode bonus/LT, MEDIUM-2 v3.3 close factor vs total debt, MEDIUM-3 indexer shrinks only on range errors (+HTTP 400/413), MEDIUM-4 URL userinfo redaction, MEDIUM-5 gas price / L1 fee caching + skip sub-threshold quotes, LOW-6 least-privilege env in compose (scoped `DatabaseSettings` / `SchedulerSettings`), LOW-9 atomic Lua lock release, LOW-10 Telegram 429 exhaustion + idempotent sends, LOW-12 Aave v3.3 min-leftover dust rule, LOW-13 startup message without a full container
 - [ ] Deferred V1 audit findings → tracked in **2.7** below (must be done before live execution)
 
+### 1.13 Market measurement (data for the V2 go/no-go decision)
+- [ ] Index `LiquidationCall` (Aave) / `AbsorbCollateral` + `BuyCollateral` (Comet) events: who liquidated, size, bonus captured, gas paid
+- [ ] For each liquidation: blocks between "became liquidatable" (our first detection) and execution → competition latency
+- [ ] Monthly report: addressable profit pool per chain/protocol, share captured by top liquidators, our detection lead/lag
+
 ---
 
 ## Stage 2 — Version 2: On-Chain Execution, Smart Contracts & CI/CD
 
 ### 2.0 Prerequisites
 - [ ] Give the user a Russian guide: VPS provisioning, SSH keys & hardening, Docker Engine install, deploy keys for GitHub, hot wallet creation & gas funding per chain
+- [ ] **User step: upgrade the RPC plan before going live.** The Alchemy free tier (30M CU/month, 300 CU/s) only sustains ~11 CU/s on average, while a 24/7 per-block bot needs ~150–250 CU/s (~400–650M CU/month). Options: Alchemy Pay-As-You-Go, a flat-rate provider (QuickNode / Chainstack / dRPC), or self-hosted nodes. Then set `RPC_CU_PER_SECOND` to ~80% of the new throughput limit (and within the monthly quota)
+- [ ] Go/no-go economics review: compare monthly costs (RPC + VPS + gas incl. lost races) with the opportunity pool measured by V1 (see 1.13)
 
 ### 2.1 Smart contracts (Foundry)
 - [ ] `contracts/` Foundry project, remappings, OpenZeppelin dependency
