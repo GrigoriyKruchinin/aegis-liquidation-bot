@@ -1,0 +1,157 @@
+# Aegis Liquidations — local V1 stack (read-only detector).
+# Start order: postgres + redis (healthy) -> migrate (completed) -> scanner + notifier (healthy)
+#              -> celery-beat (healthy once scans heartbeat).
+# Least privilege: only the two workers receive the full `.env` (Telegram token, RPC keys).
+# postgres / migrate / celery-beat get just the variables they need via interpolation.
+name: aegis-local
+
+x-db-env: &db-env
+  POSTGRES_USER: ${POSTGRES_USER:-aegis}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+  POSTGRES_DB: ${POSTGRES_DB:-aegis}
+
+x-common-env: &common-env
+  AEGIS_ENV_FILE: ""
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  LOG_JSON: ${LOG_JSON:-true}
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: "5432"
+  REDIS_URL: redis://redis:6379/0
+
+x-app: &app
+  build: .
+  image: aegis-liquidation-bot:local
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      <<: *db-env
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "60", "1", "--appendonly", "no"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  migrate:
+    <<: *app
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      <<: [*common-env, *db-env]
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  scanner:
+    <<: *app
+    command:
+      - celery
+      - -A
+      - aegis.workers.app
+      - worker
+      - -Q
+      - scan
+      - -n
+      - scanner@%h
+      - --concurrency=3
+      - --loglevel=INFO
+    env_file: .env
+    environment:
+      <<: *common-env
+      AEGIS_ENV_FILE: ""
+      AEGIS_WORKER_ROLE: scanner
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A aegis.workers.app inspect ping -d scanner@$$HOSTNAME --timeout 10"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+      start_period: 30s
+
+  notifier-worker:
+    <<: *app
+    command:
+      - celery
+      - -A
+      - aegis.workers.app
+      - worker
+      - -Q
+      - notify
+      - -n
+      - notifier@%h
+      - --concurrency=1
+      - --loglevel=INFO
+    env_file: .env
+    environment:
+      <<: *common-env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A aegis.workers.app inspect ping -d notifier@$$HOSTNAME --timeout 10"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+      start_period: 30s
+
+  celery-beat:
+    <<: *app
+    command:
+      - celery
+      - -A
+      - aegis.workers.app
+      - beat
+      - --schedule=/tmp/celerybeat-schedule
+      - --loglevel=INFO
+    environment:
+      <<: *common-env
+      ENABLED_CHAINS: ${ENABLED_CHAINS:-base,arbitrum,optimism}
+      INDEX_INTERVAL_SECONDS: ${INDEX_INTERVAL_SECONDS:-60}
+      SCAN_INTERVAL_SECONDS: ${SCAN_INTERVAL_SECONDS:-30}
+      WATCHLIST_INTERVAL_SECONDS: ${WATCHLIST_INTERVAL_SECONDS:-6}
+    depends_on:
+      scanner:
+        condition: service_healthy
+      notifier-worker:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-m", "aegis.workers.healthcheck", "heartbeat", "--max-age", "300"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+volumes:
+  pgdata:
+  redisdata:

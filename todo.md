@@ -17,91 +17,92 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress
 - [x] Create skills: `check-code-quality`, `run-tests`, `audit-security`
 - [x] Create `.claude/settings.json` (dev command allowlist, `.env` read deny)
 - [x] Create `todo.md`
-- [ ] Await user command **"Start Implementation"**
+- [x] Await user command **"Start Implementation"**
 
 ---
 
 ## Stage 1 — Version 1: Local Opportunity Detector & Telegram Alerts (Read-Only)
 
 ### 1.0 Prerequisites
-- [ ] Give the user a Russian guide: create bot via `@BotFather`, get `TELEGRAM_BOT_TOKEN`, get `TELEGRAM_CHAT_ID`, obtain RPC URLs (Alchemy/Infura/QuickNode), fill local `.env` (no VPS steps)
+- [x] Give the user a Russian guide: create bot via `@BotFather`, get `TELEGRAM_BOT_TOKEN`, get `TELEGRAM_CHAT_ID`, obtain RPC URLs (Alchemy/Infura/QuickNode), fill local `.env` (no VPS steps)
 
 ### 1.1 Project scaffolding
-- [ ] `pyproject.toml` with `uv` (Python 3.12), dependency groups `dev`, `test`
-- [ ] Ruff config (line length 100, rule set incl. `B`, `UP`, `S`, `ASYNC`, `ANN`, `I`)
-- [ ] Mypy strict config (+ pydantic plugin)
-- [ ] Pytest config (`asyncio_mode=auto`, `integration` marker)
-- [ ] Root `Makefile` (install, format, format-check, lint, typecheck, test, check, migrate, up-local, down-local, logs-local)
-- [ ] `src/aegis/` package skeleton per `CLAUDE.md` layout
-- [ ] `.env.example` with all keys and placeholders
+- [x] `pyproject.toml` with `uv` (Python 3.12), dependency groups `dev`, `test`
+- [x] Ruff config (line length 100, rule set incl. `B`, `UP`, `S`, `ASYNC`, `ANN`, `I`)
+- [x] Mypy strict config (+ pydantic plugin)
+- [x] Pytest config (`asyncio_mode=auto`, `integration` marker)
+- [x] Root `Makefile` (install, format, format-check, lint, typecheck, test, check, migrate, up-local, down-local, logs-local, ps-local)
+- [x] `src/aegis/` package skeleton per `CLAUDE.md` layout
+- [x] `.env.example` with all keys and placeholders (single `ALCHEMY_API_KEY` for all chains + optional per-chain fallback URLs)
 - [ ] Pre-commit hooks (ruff, mypy) — optional
 
 ### 1.2 Configuration
-- [ ] `config/settings.py` — `AppSettings` (pydantic-settings): env, log level, DB URL, Redis URL, Telegram token/chat id (`SecretStr`), `MIN_PROFIT_USD`, scan interval, RPC concurrency
-- [ ] `config/chains.py` — per-chain config models (chain id, RPC URLs, Multicall3, block time, native token, enabled protocols)
-- [ ] Static protocol deployment registry (Aave v3 Pool / PoolDataProvider / Oracle; Compound v3 Comet markets) for Base, Arbitrum, Optimism
-- [ ] Settings validation tests
+- [x] `config/settings.py` — `AppSettings` (pydantic-settings): env, log level, DB, Redis, Telegram token/chat id (`SecretStr`), `MIN_PROFIT_USD`, intervals, RPC resilience
+- [x] `config/chains.py` — per-chain config (chain id, provider kind, block time, native feed, explorer, Alchemy network, reorg margin)
+- [x] Static protocol deployment registry (Aave v3 `PoolAddressesProvider` → Pool/Oracle resolved at runtime; 9 Comet markets) — verified on mainnet
+- [x] Settings validation tests
 
 ### 1.3 Core domain & interfaces
-- [ ] Domain models: `Chain`, `Asset`, `Borrower`, `Position`, `CollateralLeg`, `DebtLeg`, `LiquidationOpportunity`, `ProfitEstimate`
-- [ ] Interfaces: `BaseChainProvider`, `BaseLendingProtocol`, `IHealthFactorScanner`, `IBorrowerIndexer`, `IPriceOracle`, `IGasEstimator`, `IProfitEstimator`, `INotifier`, repository interfaces
-- [ ] `core/errors.py` exception hierarchy
-- [ ] DI container / factories (`core/container.py`) + chain & protocol registries
-- [ ] Structured logging setup
+- [x] Domain models: `Asset`, `MarketRef`, `HealthCheck`, `Position`, `CollateralLeg`, `DebtLeg`, `LiquidationQuote`, `GasEstimate`, `ProfitEstimate`, `LiquidationOpportunity`, `OpportunitySummary`
+- [x] Interfaces: `BaseChainProvider`, `BaseLendingProtocol`, `IHealthFactorScanner`, `IBorrowerIndexer`, `IPriceOracle`, `IGasEstimator`, `IProfitEstimator`, `INotifier`, `INotificationDispatcher`, `IAlertDeduplicator`, repository interfaces
+- [x] `core/errors.py` exception hierarchy
+- [x] DI container (`core/container.py`) + chain & protocol registries (`core/registry.py`)
+- [x] Structured logging setup (structlog JSON) + secret redaction (`core/redact.py`)
 
 ### 1.4 Chain providers
-- [ ] Generic `EvmChainProvider` (AsyncWeb3, retries, timeouts, semaphore, RPC fallback list)
-- [ ] Multicall3 batch helper
-- [ ] `BaseProvider`, `ArbitrumProvider`, `OptimismProvider` (chain-specific L1 data fee: OP-stack `GasPriceOracle`, Arbitrum `NodeInterface.gasEstimateL1Component`)
-- [ ] Unit tests with mocked RPC
+- [x] Generic `EvmChainProvider` (AsyncWeb3, retries, timeouts, semaphore, RPC fallback list)
+- [x] Multicall3 `aggregate3` batch helper
+- [x] `OpStackChainProvider` (Base, Optimism: `GasPriceOracle.getL1FeeUpperBound`) and `ArbitrumChainProvider` (`NodeInterface.gasEstimateL1Component`)
+- [x] Unit tests with mocked RPC
 
 ### 1.5 Lending protocol adapters
-- [ ] Aave v3 adapter: borrower discovery from `Borrow`/`Supply`/`Repay`/`LiquidationCall` events, `getUserAccountData` batched, per-reserve user data, liquidation bonus & close factor (50% / 100% when HF < 0.95), oracle prices
-- [ ] Compound v3 adapter: discover accounts from `Withdraw`/`Supply`/`AbsorbDebt` events, `isLiquidatable` batched, collateral balances, `storeFrontPriceFactor`, `liquidationFactor`, absorb + buyCollateral profit model
-- [ ] ABI files under `src/aegis/protocols/abi/`
-- [ ] Unit tests with recorded fixtures
+- [x] Aave v3 adapter: discovery from `Borrow` events, batched `getUserAccountData`, user-config bitmap + aToken/debt-token balances, bonus & protocol fee, close factor (v3.3 rules), oracle prices
+- [x] Compound v3 adapter: discovery from `Withdraw` events, batched `isLiquidatable` + balances, `storeFrontPriceFactor`/`liquidationFactor` discount, reserves vs target check, native-denominated markets
+- [x] ABI definitions as typed human-readable signatures (`core/abi.py`, per-adapter constants) instead of JSON files
+- [x] Unit tests with encoded fixtures
 
 ### 1.6 Borrower indexer & scanner
-- [ ] Incremental event indexer (checkpoint last block per chain/protocol in DB, chunked `eth_getLogs`, reorg safety margin)
-- [ ] `HealthFactorScanner`: batch HF checks, filter `HF < 1.0`, emit opportunities
-- [ ] Watchlist of near-liquidation positions (e.g. HF < 1.05) scanned more frequently
-- [ ] Orchestrator iterating registered chains × protocols (no protocol-specific code)
+- [x] Incremental event indexer (checkpoint per market in DB, adaptive chunked `eth_getLogs`, reorg safety margin, bounded blocks per run)
+- [x] `HealthFactorScanner`: batch HF checks, filter `HF < 1.0` above dust, emit opportunities
+- [x] Watchlist of near-liquidation positions (HF < `WATCHLIST_HF_THRESHOLD`) scanned every 6s
+- [x] Orchestrator iterating registered markets per chain (no protocol-specific code)
 
 ### 1.7 Profit estimator
-- [ ] Best debt/collateral pair selection
-- [ ] Gross profit = liquidation bonus value in USD (self-funded assumption)
-- [ ] Gas estimate: L2 execution gas (protocol-specific baseline) × gas price + L1 data fee → USD via native token price
-- [ ] Net profit = gross − gas; `Decimal` throughout
-- [ ] Unit tests with hand-computed scenarios
+- [x] Best debt/collateral pair selection (top quotes by gross, then best net)
+- [x] Gross profit = liquidation bonus value in USD (self-funded assumption)
+- [x] Gas estimate: protocol gas baseline × gas price (+20% margin) + L1 data fee → USD via Chainlink ETH/USD (staleness-checked)
+- [x] Net profit = gross − gas; `Decimal` throughout
+- [x] Unit tests with hand-computed scenarios
 
 ### 1.8 Database (PostgreSQL)
-- [ ] Async engine & session factory
-- [ ] Models: `chains`, `protocols`, `borrowers`, `positions` (snapshot), `opportunities`, `notifications`, `indexer_checkpoints`
-- [ ] Repositories implementing interfaces
-- [ ] Alembic setup + initial migration
+- [x] Async engine & session factory
+- [x] Models: `borrowers` (incl. latest HF snapshot), `opportunities`, `notifications`, `indexer_checkpoints` (chains/protocols stay in the static registry)
+- [x] Repositories implementing interfaces (+ integration tests on real Postgres)
+- [x] Alembic setup + initial migration (`0001`)
 
 ### 1.9 Redis & Celery
-- [ ] Celery app (Redis broker/backend), JSON serializer, task routes (`scan`, `notify` queues)
-- [ ] Beat schedule: indexer sync, full scan, watchlist scan per chain
-- [ ] `notify_opportunity` task with retries + backoff
-- [ ] Redis-based dedup (borrower+chain+protocol key with TTL) to prevent alert spam
+- [x] Celery app (Redis broker/backend), JSON serializer, task routes (`scan`, `notify` queues)
+- [x] Beat schedule: indexer sync, full scan, watchlist scan per chain; Redis locks prevent overlapping runs
+- [x] `notify_opportunity` task with retries + backoff (honours Telegram `retry_after`)
+- [x] Redis-based dedup (chain+protocol+market+borrower key with TTL), released on delivery failure
 
 ### 1.10 Telegram notifier
-- [ ] `TelegramNotifier(INotifier)` via `httpx` (rate-limit aware, retry on 429)
-- [ ] HTML template "🚨 Liquidation Opportunity": network, protocol, borrower (`<code>` + explorer link), HF, debt asset/size, collateral asset, bonus %, gas cost, net profit, blockquote summary, separators
-- [ ] Escape all dynamic values; template snapshot tests
-- [ ] Startup / health "🟢 Scanner online" message
+- [x] `TelegramNotifier(INotifier)` via `httpx` (retry on 429 / 5xx, token never logged)
+- [x] HTML template "🚨 Liquidation Opportunity": network, protocol/market, borrower (`<code>` + explorer link), HF, debt, collateral, bonus %, gas cost, net profit, blockquote summary, separators
+- [x] Escape all dynamic values; template tests
+- [x] Startup "🟢 Aegis scanner online" message
 
 ### 1.11 Docker (local)
-- [ ] `Dockerfile` (multi-stage, `uv`, non-root user)
-- [ ] `docker-compose.local.yml`: `postgres`, `redis`, `migrate` (one-shot), `celery-worker`, `celery-beat`, `scanner`, `notifier-worker`
-- [ ] Healthchecks for Postgres (`pg_isready`), Redis (`redis-cli ping`), Celery (`celery inspect ping`), scanner (heartbeat file / Redis key)
-- [ ] `depends_on` with `condition: service_healthy` / `service_completed_successfully`
+- [x] `Dockerfile` (multi-stage, `uv`, non-root user)
+- [x] `docker-compose.local.yml`: `postgres`, `redis`, `migrate` (one-shot), `scanner` (Celery `scan` queue), `notifier-worker` (Celery `notify` queue), `celery-beat`
+- [x] Healthchecks: Postgres (`pg_isready`), Redis (`redis-cli ping`), workers (`celery inspect ping`), beat (scan heartbeat in Redis)
+- [x] `depends_on` with `condition: service_healthy` / `service_completed_successfully`
 
 ### 1.12 Testing & docs
-- [ ] Integration test on anvil fork: craft an underwater Aave v3 position, assert opportunity detected and notification rendered
-- [ ] `README.md`: overview, architecture diagram, local quickstart, configuration reference
-- [ ] `/audit-security` pass on V1
+- [x] Integration test on anvil fork (`tests/integration/test_anvil_fork.py`): real Optimism borrower made underwater via a mock AaveOracle source, opportunity detected (incl. L1 fee) and notification rendered
+- [x] `README.md`: overview, architecture diagram, local quickstart, configuration reference
+- [x] `/audit-security` pass on V1 — no CRITICAL; fixed: HIGH-1 Aave eMode bonus/LT, MEDIUM-2 v3.3 close factor vs total debt, MEDIUM-3 indexer shrinks only on range errors (+HTTP 400/413), MEDIUM-4 URL userinfo redaction, MEDIUM-5 gas price / L1 fee caching + skip sub-threshold quotes, LOW-6 least-privilege env in compose (scoped `DatabaseSettings` / `SchedulerSettings`), LOW-9 atomic Lua lock release, LOW-10 Telegram 429 exhaustion + idempotent sends, LOW-12 Aave v3.3 min-leftover dust rule, LOW-13 startup message without a full container
+- [ ] Deferred V1 audit findings → tracked in **2.7** below (must be done before live execution)
 
 ---
 
@@ -155,6 +156,14 @@ Legend: `[ ]` todo · `[x]` done · `[~]` in progress
 - [ ] 📊 Daily digest (Celery beat): deals, win/loss, gross/net, gas, per-chain breakdown
 - [ ] 📊 Monthly summary on the 1st of every month
 - [ ] `/audit-security` pass on V2
+
+### 2.7 Hardening carried over from the V1 audit (MUST be addressed in V2)
+- [ ] **(V1 audit LOW-7) RPC failover stickiness** — `EvmChainProvider._active` never returns to the primary endpoint after a single failure (`src/aegis/chains/evm.py`, `_request`). Add periodic re-probing of endpoint #0 (e.g. after N seconds or N successful calls on a fallback) and per-endpoint health stats; prefer private/sequencer RPC for execution, Alchemy only as fallback. Unit-test the recovery path.
+- [ ] **(V1 audit LOW-8) Semaphore held across retries/failover** — `_request` holds the per-chain semaphore through backoff sleeps and all endpoints, so a few slow endpoints can starve the whole chain (including watchlist scans and, in V2, time-critical execution). Acquire the semaphore per attempt only; consider separate concurrency pools for scanning vs execution so execution is never blocked by scans.
+- [ ] **(V1 audit LOW-11) Native price staleness + L2 sequencer status** — `ChainlinkNativePriceOracle` accepts answers up to 26 h old (`src/aegis/estimator/oracle.py`). Make `max_age_seconds` per chain from the feed heartbeat (Base/OP ETH/USD 1200 s, Arbitrum 86400 s + margin) in `ChainConfig`; add the Chainlink L2 Sequencer Uptime Feed check (+ grace period) and refuse to price / execute while the sequencer is down. Applies to gas costing and Comet `native`-denominated markets.
+- [ ] **(V1 audit LOW-14a) Required Postgres password** — `DatabaseSettings.postgres_password` defaults to `"aegis"`; make it required (no default) for `APP_ENV=production` and validate it is not a placeholder (`change-me`).
+- [ ] **(V1 audit LOW-14b) Pin base images by digest** — `Dockerfile` uses `python:3.12-slim` and `ghcr.io/astral-sh/uv:0.9.8` by tag; pin `@sha256:` digests for prod builds and let Dependabot/Renovate bump them.
+- [ ] **(V1 audit LOW-14c) Unbounded borrower lists** — `SqlBorrowerRepository.list_active` loads every active borrower of a market and the scanner `gather`s all check batches at once. Stream with keyset pagination (`id > last_id LIMIT n`) and bound concurrent batches, to keep memory/RPC bursts flat as the borrower set grows.
 
 ---
 
