@@ -264,6 +264,8 @@ All settings come from environment variables or `.env`. See [`.env.example`](.en
 | `TELEGRAM_CHAT_ID` | — (required) | Target chat / group / channel id |
 | `ALCHEMY_API_KEY` | — | One key for Base, Arbitrum and OP Mainnet |
 | `BASE_RPC_URLS`, `ARBITRUM_RPC_URLS`, `OPTIMISM_RPC_URLS` | empty | Extra comma-separated RPC URLs. They are tried before Alchemy and act as fallbacks |
+| `BASE_LOG_RPC_URLS`, `ARBITRUM_LOG_RPC_URLS`, `OPTIMISM_LOG_RPC_URLS` | public archive nodes | Endpoints used only for `eth_getLogs`, tried before the main ones. Alchemy's free tier caps `eth_getLogs` at 10 blocks, which makes backfills impossible. The defaults are Tenderly's public Base gateway, `arb1.arbitrum.io` and `mainnet.optimism.io`. An empty value disables them |
+| `RPC_LOG_CU_PER_SECOND` | `150` | Budget per log-only endpoint, in the same units as `RPC_CU_PER_SECOND` |
 | `ENABLED_CHAINS` | `base,arbitrum,optimism` | Chains to monitor |
 | `MIN_PROFIT_USD` | `5` | Minimum net profit (after gas) to alert |
 | `WATCHLIST_HF_THRESHOLD` | `1.05` | HF below which the watcher re-checks a borrower on every block |
@@ -273,7 +275,7 @@ All settings come from environment variables or `.env`. See [`.env.example`](.en
 | `WATCHER_HEAD_POLL_MS` | `200` | Head polling period while the watcher waits for the next block |
 | `WATCHER_PRICE_MOVE_BPS` / `WATCHER_RESCAN_COOLDOWN_SECONDS` | `50` / `5` | Oracle price move that triggers an immediate full rescan, and the cooldown between such rescans |
 | `INDEXER_LOOKBACK_DAYS` | `30` | First-run backfill window |
-| `INDEXER_LOG_CHUNK_BLOCKS` | `2000` | Initial `eth_getLogs` range. It shrinks automatically when the RPC rejects a request |
+| `INDEXER_LOG_CHUNK_BLOCKS` | `10000` | Initial `eth_getLogs` range. It shrinks to what the endpoint accepts and is not grown back into a rejected range |
 | `ALERT_DEDUP_TTL_SECONDS` | `3600` | Suppress repeat alerts for the same borrower |
 | `STATUS_REPORT_INTERVAL_HOURS` | `1` | Periodic 📊 status report to Telegram (`0` disables it) |
 | `RPC_TIMEOUT_SECONDS` / `RPC_MAX_RETRIES` / `RPC_MAX_CONCURRENCY` | `15` / `3` / `8` | RPC resilience |

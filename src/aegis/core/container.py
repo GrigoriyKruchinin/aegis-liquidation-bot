@@ -15,6 +15,7 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from aegis.chains import CHAIN_PROVIDERS
+from aegis.chains.ratelimit import NoopRateLimiter
 from aegis.config.chains import CHAINS
 from aegis.config.settings import AppSettings
 from aegis.core.interfaces import (
@@ -61,6 +62,7 @@ def _build_markets(
     rate_limiter: IRateLimiter | None = None,
     *,
     high_priority: bool = False,
+    log_rate_limiter: IRateLimiter | None = None,
 ) -> tuple[
     dict[str, BaseChainProvider],
     dict[str, list[BaseLendingProtocol]],
@@ -81,6 +83,8 @@ def _build_markets(
             multicall_batch_size=settings.multicall_batch_size,
             rate_limiter=rate_limiter,
             high_priority=high_priority,
+            log_rpc_urls=settings.log_rpc_urls_for(chain_name),
+            log_rate_limiter=log_rate_limiter,
         )
         oracle = ChainlinkNativePriceOracle(provider, chain.native_usd_feed)
         deps = ProtocolDeps(native_oracle=oracle)
@@ -149,8 +153,14 @@ class Container:
             if settings.rpc_cu_per_second > 0
             else None
         )
+        # Log-only endpoints are separate providers with their own limits: one undivided budget.
+        log_limiter = (
+            RedisRateLimiter(redis, settings.rpc_log_cu_per_second, 0)
+            if settings.rpc_log_cu_per_second > 0
+            else NoopRateLimiter()
+        )
         providers, markets, oracles = _build_markets(
-            settings, limiter, high_priority=rpc_high_priority
+            settings, limiter, high_priority=rpc_high_priority, log_rate_limiter=log_limiter
         )
         estimators = {
             name: ProfitEstimator(

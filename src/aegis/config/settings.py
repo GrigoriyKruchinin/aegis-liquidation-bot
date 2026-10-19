@@ -108,6 +108,17 @@ class AppSettings(DatabaseSettings, SchedulerSettings):
     base_rpc_urls: Annotated[list[SecretStr], NoDecode] = Field(default_factory=list)
     arbitrum_rpc_urls: Annotated[list[SecretStr], NoDecode] = Field(default_factory=list)
     optimism_rpc_urls: Annotated[list[SecretStr], NoDecode] = Field(default_factory=list)
+    #: `eth_getLogs`-only endpoints, tried before the URLs above (Alchemy's free tier caps
+    #: getLogs at 10 blocks). Defaults are free public archive nodes; set "" to disable.
+    base_log_rpc_urls: Annotated[list[SecretStr], NoDecode] = Field(
+        default_factory=lambda: [SecretStr("https://base.gateway.tenderly.co")]
+    )
+    arbitrum_log_rpc_urls: Annotated[list[SecretStr], NoDecode] = Field(
+        default_factory=lambda: [SecretStr("https://arb1.arbitrum.io/rpc")]
+    )
+    optimism_log_rpc_urls: Annotated[list[SecretStr], NoDecode] = Field(
+        default_factory=lambda: [SecretStr("https://mainnet.optimism.io")]
+    )
     rpc_timeout_seconds: float = Field(default=15.0, gt=0)
     rpc_max_retries: int = Field(default=3, ge=0, le=10)
     rpc_max_concurrency: int = Field(default=8, ge=1, le=64)
@@ -117,6 +128,9 @@ class AppSettings(DatabaseSettings, SchedulerSettings):
     rpc_cu_per_second: int = Field(default=300, ge=0)
     #: Share of the budget dedicated to the watcher; background work gets the rest (disjoint).
     rpc_reserve_pct: int = Field(default=30, ge=0, le=90)
+    #: Budget per `*_LOG_RPC_URLS` endpoint (each public node has its own limits), in the same
+    #: units: 150 = two `eth_getLogs` per second. 0 disables limiting for them.
+    rpc_log_cu_per_second: int = Field(default=150, ge=0)
 
     # --- Scanning ----------------------------------------------------------------------------
     min_profit_usd: Decimal = Field(default=Decimal("5"), ge=0)
@@ -137,14 +151,22 @@ class AppSettings(DatabaseSettings, SchedulerSettings):
     #: Dust liquidations below this gross profit skip the archive lag search (saves RPC).
     market_lag_min_gross_usd: Decimal = Field(default=Decimal(1), ge=0)
     indexer_lookback_days: int = Field(default=30, ge=1)
-    indexer_log_chunk_blocks: int = Field(default=2000, ge=1)
+    indexer_log_chunk_blocks: int = Field(default=10_000, ge=1)
     indexer_max_blocks_per_run: int = Field(default=200_000, ge=1)
 
     # --- Notifications -----------------------------------------------------------------------
     alert_dedup_ttl_seconds: int = Field(default=3600, ge=60)
     send_startup_message: bool = True
 
-    @field_validator("base_rpc_urls", "arbitrum_rpc_urls", "optimism_rpc_urls", mode="before")
+    @field_validator(
+        "base_rpc_urls",
+        "arbitrum_rpc_urls",
+        "optimism_rpc_urls",
+        "base_log_rpc_urls",
+        "arbitrum_log_rpc_urls",
+        "optimism_log_rpc_urls",
+        mode="before",
+    )
     @classmethod
     def _parse_csv(cls, value: object) -> object:
         return _split_csv(value)
@@ -177,6 +199,15 @@ class AppSettings(DatabaseSettings, SchedulerSettings):
                 f"no RPC URL for chain '{chain}': set ALCHEMY_API_KEY or {chain.upper()}_RPC_URLS"
             )
         return urls
+
+    def log_rpc_urls_for(self, chain: str) -> list[SecretStr]:
+        """`eth_getLogs`-only endpoints for a chain (may be empty)."""
+        explicit: dict[str, list[SecretStr]] = {
+            "base": self.base_log_rpc_urls,
+            "arbitrum": self.arbitrum_log_rpc_urls,
+            "optimism": self.optimism_log_rpc_urls,
+        }
+        return list(explicit.get(chain, []))
 
 
 @lru_cache(maxsize=1)

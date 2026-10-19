@@ -136,6 +136,17 @@ async def test_indexer_shrinks_chunk_on_rpc_error() -> None:
     assert checkpoints.blocks[MARKET.key] == 7000
 
 
+async def test_indexer_does_not_grow_back_into_rejected_range() -> None:
+    provider = FakeProvider()
+    provider.head = 100_000
+    provider.max_log_range = 300
+    indexer, _, checkpoints = _indexer(chunk_blocks=1000, max_blocks_per_run=20_000)
+    await checkpoints.set(MARKET, 5000)
+    await indexer.sync(StubProtocol(provider))
+    rejected = [(a, b) for a, b in provider.get_logs_calls if b - a + 1 > 300]
+    assert len(rejected) == 2  # 1000 and 500 once, never re-tried after 10 successes
+
+
 async def test_indexer_outage_does_not_shrink_chunk() -> None:
     provider = FakeProvider()
     provider.head = 10_000

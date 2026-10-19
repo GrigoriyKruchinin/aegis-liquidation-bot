@@ -41,6 +41,19 @@ class FakeClient:
         self.eth = FakeEth(behaviour)
 
 
+def make_log_provider(main: FakeClient, log: FakeClient, **kwargs: Any) -> EvmChainProvider:
+    provider = EvmChainProvider(
+        BASE,
+        [SecretStr("https://base-mainnet.g.alchemy.com/v2/SECRET")],
+        log_rpc_urls=[SecretStr("https://public.example/rpc")],
+        timeout_seconds=1,
+        max_retries=1,
+        **kwargs,
+    )
+    provider._clients = cast(Any, [main, log])
+    return provider
+
+
 def make_provider(*clients: FakeClient) -> EvmChainProvider:
     provider = EvmChainProvider(
         BASE,
@@ -218,3 +231,45 @@ async def test_transaction_not_found_maps_to_chain_data_error() -> None:
     provider = make_provider(client)
     with pytest.raises(ChainDataNotFoundError):
         await provider.transaction_receipt("0x" + "ab" * 32)
+
+
+async def test_get_logs_prefers_log_endpoint_other_calls_do_not() -> None:
+    main, log = FakeClient([7]), FakeClient([[]])
+    provider = make_log_provider(main, log)
+    assert await provider.get_logs(LogFilter("0x" + "11" * 20, (None,)), 1, 50_000) == []
+    assert await provider.block_number() == 7
+    assert (main.eth.calls, log.eth.calls) == (1, 1)
+
+
+async def test_get_logs_falls_back_to_main_without_moving_other_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("aegis.core.retry.asyncio.sleep", _no_sleep)
+    main, log = FakeClient([[]]), FakeClient([OSError("down")])
+    provider = make_log_provider(main, log)
+    assert await provider.get_logs(LogFilter("0x" + "11" * 20, (None,)), 1, 10) == []
+    assert await provider.get_logs(LogFilter("0x" + "11" * 20, (None,)), 1, 10) == []
+    assert log.eth.calls == 2  # sticky on the main endpoint for logs after the failure
+
+
+async def test_log_endpoint_charged_to_its_own_limiter() -> None:
+    main_limiter, log_limiter = RecordingLimiter(), RecordingLimiter()
+    provider = make_log_provider(
+        FakeClient([7]),
+        FakeClient([[]]),
+        rate_limiter=main_limiter,
+        log_rate_limiter=log_limiter,
+    )
+    await provider.get_logs(LogFilter("0x" + "11" * 20, (None,)), 1, 10)
+    await provider.block_number()
+    assert [c[1] for c in log_limiter.calls] == [75]
+    assert [c[1] for c in main_limiter.calls] == [10]
+    assert log_limiter.calls[0][0] != main_limiter.calls[0][0]
+
+
+def test_log_url_equal_to_main_url_is_ignored() -> None:
+    url = SecretStr("https://rpc.example/v2/KEY")
+    provider = EvmChainProvider(
+        BASE, [url], log_rpc_urls=[SecretStr("https://rpc.example/v2/KEY/")]
+    )
+    assert len(provider._clients) == 1

@@ -18,6 +18,8 @@ from aegis.core.redact import safe_error
 
 SECONDS_PER_DAY = 86_400
 GROW_AFTER_SUCCESSES = 10
+#: Successes before probing a range above the one an endpoint rejected (limits rarely change).
+PROBE_AFTER_SUCCESSES = 200
 
 logger = get_logger("scanner.indexer")
 
@@ -95,6 +97,7 @@ class EventIndexer:
         self._min_chunk = min(min_chunk_blocks, chunk_blocks)
         self._max_blocks = max_blocks_per_run
         self._chunks: dict[str, int] = {}
+        self._ceilings: dict[str, int] = {}
 
     async def sync(self, protocol: BaseLendingProtocol) -> IndexResult:
         """Index new events of the stream for one market up to `head - reorg_safety_blocks`."""
@@ -117,6 +120,7 @@ class EventIndexer:
 
         end = min(head, start + self._max_blocks - 1)
         chunk = self._chunks.get(market.key, self._max_chunk)
+        ceiling = self._ceilings.get(market.key, self._max_chunk)
         successes = 0
         discovered = 0
         cursor = start
@@ -130,6 +134,7 @@ class EventIndexer:
                 if chunk <= self._min_chunk:
                     raise
                 chunk = max(self._min_chunk, chunk // 2)
+                ceiling = min(ceiling, chunk)  # do not grow straight back into the limit
                 successes = 0
                 logger.info(
                     "log_chunk_shrunk",
@@ -144,10 +149,14 @@ class EventIndexer:
             await self._checkpoints.set(market, to_block, stream)
             cursor = to_block + 1
             successes += 1
-            if successes >= GROW_AFTER_SUCCESSES and chunk < self._max_chunk:
-                chunk = min(self._max_chunk, chunk * 2)
+            if chunk < ceiling and successes >= GROW_AFTER_SUCCESSES:
+                chunk = min(ceiling, chunk * 2)
+                successes = 0
+            elif chunk < self._max_chunk and successes >= PROBE_AFTER_SUCCESSES:
+                chunk = ceiling = min(self._max_chunk, chunk * 2)
                 successes = 0
         self._chunks[market.key] = chunk
+        self._ceilings[market.key] = ceiling
         result = IndexResult(
             from_block=start, to_block=end, discovered=discovered, caught_up=end >= head
         )

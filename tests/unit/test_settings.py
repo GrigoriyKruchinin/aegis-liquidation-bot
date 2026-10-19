@@ -90,3 +90,11 @@ def test_scoped_settings_need_no_secrets(monkeypatch: pytest.MonkeyPatch) -> Non
         .database_url.get_secret_value()
         .startswith("postgresql+asyncpg://")
     )
+
+
+def test_log_rpc_urls_default_public_and_can_be_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert [u.get_secret_value() for u in make().log_rpc_urls_for("arbitrum")] == [
+        "https://arb1.arbitrum.io/rpc"
+    ]
+    monkeypatch.setenv("BASE_LOG_RPC_URLS", "")
+    assert make().log_rpc_urls_for("base") == []

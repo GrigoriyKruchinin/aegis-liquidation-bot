@@ -160,6 +160,10 @@ class EvmChainProvider(BaseChainProvider):
         rate_limiter: Shared compute-unit budget (see `aegis.chains.ratelimit`).
         high_priority: True for latency-critical callers (the watcher), which may use the
             budget reserve that background work (indexer, scheduled scans) must leave free.
+        log_rpc_urls: Endpoints tried first for `eth_getLogs` only (e.g. free public nodes with
+            wide block ranges, while the metered provider allows 10 blocks); `rpc_urls` remain
+            their fallback. Other methods never use them.
+        log_rate_limiter: Budget for the `log_rpc_urls` buckets (defaults to `rate_limiter`).
     """
 
     def __init__(
@@ -173,19 +177,31 @@ class EvmChainProvider(BaseChainProvider):
         multicall_batch_size: int = 150,
         rate_limiter: IRateLimiter | None = None,
         high_priority: bool = False,
+        log_rpc_urls: Sequence[SecretStr] = (),
+        log_rate_limiter: IRateLimiter | None = None,
     ) -> None:
         super().__init__(config)
         if not rpc_urls:
             raise ConfigurationError(f"no RPC URLs configured for chain '{config.name}'")
-        self._clients: list[Client] = [_make_client(url) for url in rpc_urls]
-        self._buckets = [bucket_key(url.get_secret_value()) for url in rpc_urls]
-        self._limiter: IRateLimiter = rate_limiter or NoopRateLimiter()
+        main = {url.get_secret_value().rstrip("/") for url in rpc_urls}
+        log_only = [url for url in log_rpc_urls if url.get_secret_value().rstrip("/") not in main]
+        urls = [*rpc_urls, *log_only]
+        self._clients: list[Client] = [_make_client(url) for url in urls]
+        self._buckets = [bucket_key(url.get_secret_value()) for url in urls]
+        limiter: IRateLimiter = rate_limiter or NoopRateLimiter()
+        log_limiter = log_rate_limiter or limiter
+        self._limiters = [limiter] * len(rpc_urls) + [log_limiter] * len(log_only)
+        main_route = list(range(len(rpc_urls)))
+        log_route = list(range(len(rpc_urls), len(urls))) + main_route
+        # Each route remembers its own healthy endpoint, so logs served by a public node never
+        # pull latency-critical calls away from the primary provider.
+        self._routes: dict[str, list[int]] = {"default": main_route, "eth_getLogs": log_route}
+        self._active: dict[str, int] = dict.fromkeys(self._routes, 0)
         self._high_priority = high_priority
         self._timeout = timeout_seconds
         self._attempts = max_retries + 1
         self._semaphore = asyncio.Semaphore(max_concurrency)
         self._batch_size = multicall_batch_size
-        self._active = 0
         self._block_times: dict[int, int] = {}
 
     async def _request(self, op: str, fn: Callable[[Client], Awaitable[T]]) -> T:
@@ -194,14 +210,20 @@ class EvmChainProvider(BaseChainProvider):
         deterministic: list[RpcError] = []
         not_found = False
         cost = method_cost(op)
+        route_name = op if op in self._routes else "default"
+        route = self._routes[route_name]
         async with self._semaphore:
-            for offset in range(len(self._clients)):
-                index = (self._active + offset) % len(self._clients)
+            for offset in range(len(route)):
+                position = (self._active[route_name] + offset) % len(route)
+                index = route[position]
                 client = self._clients[index]
                 bucket = self._buckets[index]
+                limiter = self._limiters[index]
 
-                async def wait_budget(bucket: str = bucket) -> None:
-                    await self._limiter.acquire(bucket, cost, high_priority=self._high_priority)
+                async def wait_budget(
+                    bucket: str = bucket, limiter: IRateLimiter = limiter
+                ) -> None:
+                    await limiter.acquire(bucket, cost, high_priority=self._high_priority)
 
                 try:
                     result = await retry_async(
@@ -233,7 +255,7 @@ class EvmChainProvider(BaseChainProvider):
                         error=safe_error(exc),
                     )
                     continue
-                self._active = index
+                self._active[route_name] = position
                 return result
         summary = f"{self.name} {op} failed on all endpoints: {'; '.join(errors)}"
         if deterministic and len(deterministic) == len(errors):
