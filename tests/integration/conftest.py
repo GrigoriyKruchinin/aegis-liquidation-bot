@@ -5,7 +5,7 @@ they never touch the data of a running bot. Connection settings come from `.env`
 user, db name) and can be overridden:
 
     TEST_POSTGRES_HOST (default: localhost)
-    TEST_POSTGRES_PORT (default: 5433, the port published by docker-compose.local.yml)
+    TEST_POSTGRES_PORT (default: 5433, the port published by docker-compose.yml)
 """
 
 from __future__ import annotations
@@ -64,7 +64,7 @@ async def sessions() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     except (OSError, TimeoutError) as exc:
         pytest.skip(
             f"PostgreSQL not reachable at {settings.postgres_host}:{settings.postgres_port} "
-            f"({type(exc).__name__}); start it with `make up-local` or set TEST_POSTGRES_*"
+            f"({type(exc).__name__}); start it with `make up` or set TEST_POSTGRES_*"
         )
     url: SecretStr = settings.model_copy(update={"postgres_db": name}).database_url
     engine = create_async_engine(

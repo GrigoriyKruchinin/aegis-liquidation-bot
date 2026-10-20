@@ -37,7 +37,11 @@ def container() -> Container:
     _loop()
     current = _state.get("container")
     if not isinstance(current, Container):
-        current = Container.build(get_settings(), lambda: CeleryNotificationDispatcher(app))
+        current = Container.build(
+            get_settings(),
+            lambda: CeleryNotificationDispatcher(app),
+            alert_dispatcher_factory=lambda: CeleryNotificationDispatcher(app),
+        )
         _state["container"] = current
     return current
 

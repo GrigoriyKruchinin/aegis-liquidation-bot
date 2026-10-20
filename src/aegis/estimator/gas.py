@@ -10,7 +10,7 @@ from aegis.core.models import GasEstimate, TxTemplate
 
 
 class L2GasEstimator:
-    """`IGasEstimator` using protocol-specific gas baselines (no `eth_estimateGas` in V1).
+    """`IGasEstimator` using protocol-specific gas baselines (no `eth_estimateGas` calls).
 
     The gas price and the L1 data fee are cached briefly: every quote of a scan shares them, and
     the L1 fee depends only on the calldata size, so it is cached per (target, calldata length).

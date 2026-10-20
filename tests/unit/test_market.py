@@ -5,13 +5,16 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import pytest
 from eth_abi.abi import encode
 
 from aegis.config.chains import CometMarketConfig
+from aegis.core.errors import NotFoundError, NotificationError
 from aegis.core.interfaces import BaseLendingProtocol
 from aegis.core.models import (
     EventEnrichment,
     LiquidationEvent,
+    LiquidationRecord,
     LogEntry,
     MarketRef,
     Sighting,
@@ -252,6 +255,28 @@ class MemoryEvents:
     async def borrower_known(self, market: MarketRef, borrower: str, before_block: int) -> bool:
         return self.known
 
+    async def enriched_between(
+        self, since: datetime, until: datetime, kinds: Sequence[str]
+    ) -> list[LiquidationRecord]:
+        return []
+
+    async def get_record(self, event_id: int) -> LiquidationRecord:
+        raise NotFoundError(str(event_id))
+
+    async def pending_count(self) -> int:
+        return len(self.events) - len(self.enriched)
+
+
+@dataclass
+class RecordingAlerts:
+    sent: list[int] = field(default_factory=list)
+    fail: bool = False
+
+    async def dispatch_liquidation(self, event_id: int) -> None:
+        if self.fail:
+            raise NotificationError("broker down")
+        self.sent.append(event_id)
+
 
 @dataclass
 class MemorySightings:
@@ -284,6 +309,56 @@ class MemoryUptime:
 
     async def was_online(self, chain: str, at: datetime) -> bool:
         return self.online
+
+
+async def _enrichable_event() -> tuple[AaveV3Protocol, MemoryEvents, datetime]:
+    """One indexed Aave liquidation whose receipt and prices are available ($49.988 net)."""
+    protocol, provider = _aave()
+    events = MemoryEvents()
+    await events.add([protocol.decode_liquidation(_aave_log(100))])  # type: ignore[list-item]
+    block_time = datetime.now(UTC).replace(microsecond=0) - timedelta(minutes=5)
+    provider.receipts["0x" + "ab" * 32] = TxReceiptInfo(
+        tx_from="0x" + "ee" * 20, tx_to=LIQUIDATOR, tx_index=2, gas_used=500_000,
+        effective_gas_price=10**7, l1_fee=10**12, status=1,
+        block_timestamp=int(block_time.timestamp()), logs_in_tx=9,
+    )  # fmt: skip
+    provider.on(ORACLE, GET_ASSETS_PRICES.selector,
+                lambda _: encode(["uint256[]"], [[2000 * 10**8, 10**8]]))  # fmt: skip
+    provider.on(
+        POOL,
+        GET_USER_ACCOUNT_DATA.selector,
+        lambda _: encode(["uint256"] * 6, [1, 100, 0, 0, 0, 98 * 10**16]),
+    )
+    return protocol, events, block_time
+
+
+@pytest.mark.parametrize(
+    ("min_net", "age_minutes", "expected"),
+    [(Decimal(10), 60, [0]), (Decimal(100), 60, []), (Decimal(10), 1, []), (Decimal(0), 60, [])],
+)
+async def test_large_liquidation_alert(
+    min_net: Decimal, age_minutes: int, expected: list[int]
+) -> None:
+    protocol, events, _ = await _enrichable_event()
+    alerts = RecordingAlerts()
+    enricher = MarketEnricher(
+        {protocol.market.key: protocol}, {"base": FakeOracle(Decimal(2000))}, events,
+        MemorySightings(), MemoryUptime(), lag_window_seconds=60, alerts=alerts,
+        alert_min_net_usd=min_net, alert_max_age_seconds=age_minutes * 60,
+    )  # fmt: skip
+    assert await enricher.enrich_pending() == 1
+    assert alerts.sent == expected
+
+
+async def test_alert_failure_keeps_enrichment() -> None:
+    protocol, events, _ = await _enrichable_event()
+    enricher = MarketEnricher(
+        {protocol.market.key: protocol}, {"base": FakeOracle(Decimal(2000))}, events,
+        MemorySightings(), MemoryUptime(), lag_window_seconds=60,
+        alerts=RecordingAlerts(fail=True), alert_min_net_usd=Decimal(1),
+    )  # fmt: skip
+    assert await enricher.enrich_pending() == 1
+    assert 0 in events.enriched and not events.failed
 
 
 async def test_stream_and_enricher_end_to_end() -> None:

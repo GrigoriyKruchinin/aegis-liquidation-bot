@@ -1,9 +1,9 @@
-# Aegis Liquidations — local V1 stack (read-only detector).
-# Start order: postgres + redis (healthy) -> migrate (completed) -> scanner + notifier (healthy)
+# Aegis Liquidations — read-only liquidation analytics stack.
+# Start order: postgres + redis (healthy) -> migrate (completed) -> workers (healthy)
 #              -> watcher + celery-beat (healthy once they heartbeat).
-# Least privilege: only the two workers receive the full `.env` (Telegram token, RPC keys).
+# Least privilege: only the app services receive the full `.env` (Telegram token, RPC keys).
 # postgres / migrate / celery-beat get just the variables they need via interpolation.
-name: aegis-local
+name: aegis
 
 x-db-env: &db-env
   POSTGRES_USER: ${POSTGRES_USER:-aegis}
@@ -20,7 +20,7 @@ x-common-env: &common-env
 
 x-app: &app
   build: .
-  image: aegis-liquidation-bot:local
+  image: aegis-liquidation-bot:latest
   restart: unless-stopped
   logging:
     driver: json-file
@@ -126,7 +126,7 @@ services:
       start_period: 30s
 
   market-worker:
-    # Competitor analysis: indexes and enriches liquidations (separate queue, never blocks scans).
+    # Market analytics: indexes liquidation events (separate queue, never blocks scans).
     <<: *app
     command:
       - celery
@@ -149,6 +149,35 @@ services:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "celery -A aegis.workers.app inspect ping -d market@$$HOSTNAME --timeout 10"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+      start_period: 30s
+
+  enrich-worker:
+    # Enriches indexed liquidations. Own queue: long backfills on `market` must not expire it.
+    <<: *app
+    command:
+      - celery
+      - -A
+      - aegis.workers.app
+      - worker
+      - -Q
+      - enrich
+      - -n
+      - enrich@%h
+      - --concurrency=1
+      - --loglevel=INFO
+    env_file: .env
+    environment:
+      <<: *common-env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A aegis.workers.app inspect ping -d enrich@$$HOSTNAME --timeout 10"]
       interval: 30s
       timeout: 20s
       retries: 3
@@ -193,12 +222,15 @@ services:
       MARKET_ENABLED: ${MARKET_ENABLED:-true}
       MARKET_INDEX_INTERVAL_SECONDS: ${MARKET_INDEX_INTERVAL_SECONDS:-300}
       MARKET_ENRICH_INTERVAL_SECONDS: ${MARKET_ENRICH_INTERVAL_SECONDS:-120}
+      MARKET_DIGEST_HOUR_UTC: ${MARKET_DIGEST_HOUR_UTC:-9}
     depends_on:
       scanner:
         condition: service_healthy
       notifier-worker:
         condition: service_healthy
       market-worker:
+        condition: service_healthy
+      enrich-worker:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-m", "aegis.workers.healthcheck", "heartbeat", "--max-age", "300"]

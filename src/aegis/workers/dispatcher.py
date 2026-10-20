@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 
 from celery import Celery
+from kombu.exceptions import KombuError
 
 from aegis.core.errors import NotificationError
 from aegis.core.models import OpportunitySummary
@@ -12,10 +13,12 @@ from aegis.core.models import OpportunitySummary
 NOTIFY_OPPORTUNITY_TASK = "aegis.notify.opportunity"
 NOTIFY_SYSTEM_TASK = "aegis.notify.system"
 NOTIFY_STATUS_TASK = "aegis.notify.status"
+NOTIFY_LIQUIDATION_TASK = "aegis.notify.liquidation"
+NOTIFY_DIGEST_TASK = "aegis.notify.digest"
 
 
 class CeleryNotificationDispatcher:
-    """`INotificationDispatcher` enqueueing the notify task by opportunity id."""
+    """`INotificationDispatcher` + `ILiquidationAlertDispatcher` enqueueing notify tasks by id."""
 
     def __init__(self, app: Celery) -> None:
         self._app = app
@@ -27,3 +30,12 @@ class CeleryNotificationDispatcher:
         await asyncio.to_thread(
             self._app.send_task, NOTIFY_OPPORTUNITY_TASK, args=[opportunity.id], queue="notify"
         )
+
+    async def dispatch_liquidation(self, event_id: int) -> None:
+        """Enqueue the 🐋 large liquidation alert for an enriched event."""
+        try:
+            await asyncio.to_thread(
+                self._app.send_task, NOTIFY_LIQUIDATION_TASK, args=[event_id], queue="notify"
+            )
+        except (KombuError, OSError) as exc:
+            raise NotificationError(f"broker publish failed: {type(exc).__name__}") from exc

@@ -1,1 +1,1 @@
-"""Market measurement: competitor liquidations, latency and our coverage."""
+"""Liquidation market analytics: who liquidates, for how much, how fast, and detector coverage."""

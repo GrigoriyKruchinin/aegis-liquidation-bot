@@ -1,6 +1,6 @@
 ---
 name: audit-security
-description: Security & performance audit of the current changes in Aegis Liquidations — delegates review to the security-critic-agent and runs automated scanners (bandit, pip-audit, Slither for contracts). Use for anything touching keys, RPC, money math, execution, or Solidity.
+description: Security & performance audit of the current changes in Aegis Liquidations — delegates review to the security-critic-agent and runs automated scanners (bandit, pip-audit). Use for anything touching RPC, secrets, money math, the database or notifications.
 ---
 
 # audit-security
@@ -13,6 +13,5 @@ description: Security & performance audit of the current changes in Aegis Liquid
    uv run pip-audit
    git ls-files | grep -E '(^|/)\.env$' && echo "ERROR: .env is tracked"
    ```
-   If `contracts/` exists: `cd contracts && slither . --exclude-dependencies`.
 4. Merge agent findings and scanner output into one severity-ranked report (`CRITICAL` → `LOW`) with `file:line`, failure scenario, and suggested fix.
-5. Do not apply fixes unless the user asks.
+5. Do not apply fixes unless the user asks; fixes are implemented by the `developer-agent`.

@@ -22,6 +22,7 @@ from aegis.core.models import (
     LiquidationEvent,
     LiquidationOpportunity,
     LiquidationQuote,
+    LiquidationRecord,
     LogEntry,
     LogFilter,
     MarketRef,
@@ -258,6 +259,12 @@ class INotificationDispatcher(Protocol):
     async def dispatch(self, opportunity: OpportunitySummary) -> None: ...
 
 
+class ILiquidationAlertDispatcher(Protocol):
+    """Schedules a 🐋 alert for a large liquidation that was just enriched."""
+
+    async def dispatch_liquidation(self, event_id: int) -> None: ...
+
+
 class IAlertDeduplicator(Protocol):
     """Prevents repeated alerts for the same position within a TTL."""
 
@@ -361,7 +368,7 @@ class IUptimeRepository(Protocol):
 
 
 class ILiquidationEventRepository(Protocol):
-    """Raw and enriched liquidation events (market / competitor analysis)."""
+    """Raw and enriched liquidation events (liquidation market analytics)."""
 
     async def add(self, events: Sequence[LiquidationEvent]) -> int:
         """Insert new events (idempotent per tx/log); returns how many were new."""
@@ -388,5 +395,23 @@ class ILiquidationEventRepository(Protocol):
     async def mark_failed(self, event_id: int, error: str) -> None: ...
 
     async def borrower_known(self, market: MarketRef, borrower: str, before_block: int) -> bool:
-        """Whether our indexer had discovered the borrower before `before_block`."""
+        """Whether the indexer had discovered the borrower before `before_block`."""
+        ...
+
+    async def enriched_between(
+        self, since: datetime, until: datetime, kinds: Sequence[str]
+    ) -> list[LiquidationRecord]:
+        """Enriched events of the given kinds with ``since <= block_time < until``."""
+        ...
+
+    async def get_record(self, event_id: int) -> LiquidationRecord:
+        """One enriched event.
+
+        Raises:
+            NotFoundError: if it does not exist or is not enriched yet.
+        """
+        ...
+
+    async def pending_count(self) -> int:
+        """Events still waiting for enrichment."""
         ...

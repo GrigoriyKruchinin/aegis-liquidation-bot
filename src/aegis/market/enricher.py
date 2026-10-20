@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping, Sequence
-from datetime import UTC, datetime
+from collections.abc import Callable, Mapping, Sequence
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from sqlalchemy.exc import SQLAlchemyError
@@ -12,6 +12,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from aegis.core.errors import AegisError, HistoricalStateUnavailableError, RpcError
 from aegis.core.interfaces import (
     BaseLendingProtocol,
+    ILiquidationAlertDispatcher,
     ILiquidationEventRepository,
     IPriceOracle,
     ISightingRepository,
@@ -29,10 +30,12 @@ from aegis.core.models import (
 from aegis.core.redact import safe_error
 from aegis.market.lag import LagResult, find_liquidatable_since
 
-#: Events that end a position's liquidatable window (searched for the competitor lag).
+#: Events that end a position's liquidatable window (searched for the liquidation lag).
 LAG_KINDS = frozenset({"aave_liquidation", "comet_absorb"})
 #: Events that represent a paid on-chain action (they carry a share of the tx fee).
 GAS_KINDS = frozenset({"aave_liquidation", "comet_absorb", "comet_buy"})
+#: Events where the liquidator is paid (candidates for the 🐋 large liquidation alert).
+ALERT_KINDS = frozenset({"aave_liquidation", "comet_buy"})
 #: A sighting episode last seen at most this long before a liquidation still counts as ongoing.
 SIGHTING_GAP_SECONDS = 600
 #: A liquidation of the same borrower within this window before marks a partial-liquidation
@@ -43,7 +46,7 @@ logger = get_logger("market.enricher")
 
 
 class MarketEnricher:
-    """Turns raw liquidation events into competitor / latency / coverage data.
+    """Turns raw liquidation events into liquidator / latency / coverage data.
 
     Transient RPC errors (rate limits, timeouts) make the whole event retry later, up to
     `max_attempts`; only the final attempt stores an event with missing pieces, recorded in
@@ -54,13 +57,17 @@ class MarketEnricher:
         markets: Market adapters keyed by `MarketRef.key`.
         native_oracles: Native token USD price per chain (gas costing).
         events: Liquidation event repository.
-        sightings: Our sightings (to compute our lead time).
+        sightings: Detector sightings (to compute the detector's lead time).
         uptime: Watcher uptime (to tell "missed" from "offline").
         lag_window_seconds: Search window for the start of the liquidatable period.
         max_attempts: Give up retrying an event after this many failures.
         concurrency: Events enriched in parallel (each needs ~10-15 RPC calls).
         lag_min_gross_usd: Skip the (RPC-heavy) lag search for dust liquidations below this
-            gross profit; nobody races for them, so their timing says nothing about competition.
+            gross profit; their timing says nothing about liquidator speed.
+        alerts: Receives large liquidations right after they are enriched (optional).
+        alert_min_net_usd: Net profit from which a liquidation is alerted; 0 disables alerts.
+        alert_max_age_seconds: Older liquidations (backfilled history) are never alerted.
+        clock: Current time (injectable for tests).
     """
 
     def __init__(
@@ -75,6 +82,10 @@ class MarketEnricher:
         max_attempts: int = 5,
         concurrency: int = 4,
         lag_min_gross_usd: Decimal = Decimal(1),
+        alerts: ILiquidationAlertDispatcher | None = None,
+        alert_min_net_usd: Decimal = Decimal(0),
+        alert_max_age_seconds: int = 3600,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._markets = markets
         self._oracles = native_oracles
@@ -85,6 +96,10 @@ class MarketEnricher:
         self._max_attempts = max_attempts
         self._concurrency = concurrency
         self._lag_min_gross = lag_min_gross_usd
+        self._alerts = alerts
+        self._alert_min_net = alert_min_net_usd
+        self._alert_max_age = timedelta(seconds=alert_max_age_seconds)
+        self._clock = clock
         self._gas_topics: frozenset[bytes] = frozenset().union(
             *(m.gas_bearing_topics() for m in markets.values())
         )
@@ -114,11 +129,12 @@ class MarketEnricher:
             final = attempts + 1 >= self._max_attempts
             enrichment = await self.enrich(protocol, event, final_attempt=final)
             await self._events.save_enrichment(event_id, enrichment)
+            # Right after the save: a later bookkeeping error must not lose the alert.
+            await self._maybe_alert(event_id, event, enrichment)
             if event.borrower and event.kind in LAG_KINDS:
                 await self._sightings.close(
                     event.market, event.borrower, "liquidated", enrichment.block_time
                 )
-            return True
         except (AegisError, SQLAlchemyError) as exc:
             logger.warning(
                 "market_enrich_failed",
@@ -132,6 +148,34 @@ class MarketEnricher:
             except (AegisError, SQLAlchemyError) as mark_exc:
                 logger.error("market_mark_failed_failed", error=safe_error(mark_exc))
             return False
+        return True
+
+    async def _maybe_alert(
+        self, event_id: int, event: LiquidationEvent, enrichment: EventEnrichment
+    ) -> None:
+        """Dispatch the 🐋 alert for a large, recent liquidation; never raises."""
+        net = enrichment.net_profit_usd
+        if (
+            self._alerts is None
+            or self._alert_min_net <= 0
+            or event.kind not in ALERT_KINDS
+            or net is None
+            or net < self._alert_min_net
+        ):
+            return
+        age = self._clock() - enrichment.block_time
+        if age > self._alert_max_age:
+            # Backfilled history, or an enrichment backlog older than the alert window.
+            logger.info(
+                "market_alert_skipped_stale",
+                tx=event.tx_hash,
+                age_seconds=int(age.total_seconds()),
+            )
+            return
+        try:
+            await self._alerts.dispatch_liquidation(event_id)
+        except AegisError as exc:  # the event is stored; only the alert is lost
+            logger.warning("market_alert_failed", tx=event.tx_hash, error=safe_error(exc))
 
     async def enrich(
         self, protocol: BaseLendingProtocol, event: LiquidationEvent, *, final_attempt: bool = True
@@ -163,7 +207,8 @@ class MarketEnricher:
         if event.borrower and event.kind in LAG_KINDS:
             follow_up = await self._is_follow_up(protocol, event)
             worth_racing = (
-                event.kind == "comet_absorb"  # absorbs carry no profit; the race still tells
+                event.kind
+                == "comet_absorb"  # absorbs carry no profit; their speed is still informative
                 or valuation is None
                 or valuation.gross_profit_usd >= self._lag_min_gross
             )

@@ -1,16 +1,17 @@
-"""Celery application: Redis broker/backend, JSON only, `scan` and `notify` queues."""
+"""Celery application: Redis broker/backend, JSON only, scan/notify/market/enrich queues."""
 
 from __future__ import annotations
 
 from typing import Any
 
 from celery import Celery
+from celery.schedules import crontab
 
 from aegis.config.settings import SchedulerSettings, get_scheduler_settings
 
 
 def build_beat_schedule(settings: SchedulerSettings) -> dict[str, dict[str, Any]]:
-    """Per-chain periodic tasks (indexer sync, full scan) and the status report.
+    """Per-chain periodic tasks (indexing, scans, market analytics) and Telegram reports.
 
     Near-liquidation positions are re-checked every block by the `watcher` service, not here.
     """
@@ -39,7 +40,13 @@ def build_beat_schedule(settings: SchedulerSettings) -> dict[str, dict[str, Any]
         schedule["market-enrich"] = {
             "task": "aegis.market.enrich",
             "schedule": float(settings.market_enrich_interval_seconds),
-            "options": {"queue": "market", "expires": settings.market_enrich_interval_seconds},
+            "options": {"queue": "enrich", "expires": settings.market_enrich_interval_seconds},
+        }
+    if settings.market_enabled and settings.market_digest_hour_utc >= 0:
+        schedule["market-digest"] = {
+            "task": "aegis.notify.digest",
+            "schedule": crontab(minute=0, hour=settings.market_digest_hour_utc),
+            "options": {"queue": "notify", "expires": 3600},
         }
     if settings.status_report_interval_hours > 0:
         interval = settings.status_report_interval_hours * 3600
@@ -66,7 +73,8 @@ def create_celery_app(settings: SchedulerSettings) -> Celery:
         task_routes={
             "aegis.scan.*": {"queue": "scan"},
             "aegis.notify.*": {"queue": "notify"},
-            # Market measurement (backfill can run for long): own worker, never blocks scans.
+            # Market analytics (backfill can run for long): own workers, never block scans.
+            "aegis.market.enrich": {"queue": "enrich"},
             "aegis.market.*": {"queue": "market"},
         },
         task_acks_late=True,

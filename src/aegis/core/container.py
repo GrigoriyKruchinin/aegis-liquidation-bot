@@ -21,6 +21,7 @@ from aegis.config.settings import AppSettings
 from aegis.core.interfaces import (
     BaseChainProvider,
     BaseLendingProtocol,
+    ILiquidationAlertDispatcher,
     INotificationDispatcher,
     IRateLimiter,
     ScanResult,
@@ -37,12 +38,13 @@ from aegis.db.repositories import (
 )
 from aegis.db.session import create_engine, create_session_factory
 from aegis.estimator.gas import L2GasEstimator
-from aegis.estimator.oracle import ChainlinkNativePriceOracle
+from aegis.estimator.oracle import STALENESS_MARGIN_SECONDS, ChainlinkNativePriceOracle
 from aegis.estimator.profit import ProfitEstimator
 from aegis.market.enricher import MarketEnricher, index_markets
 from aegis.market.stream import LiquidationStream
 from aegis.notifier.telegram import TelegramNotifier
 from aegis.protocols import PROTOCOLS, ProtocolDeps
+from aegis.reporting.digest import MarketDigestReporter
 from aegis.reporting.status import StatusReporter
 from aegis.scanner.health import HealthFactorScanner
 from aegis.scanner.indexer import EventBorrowerIndexer, EventIndexer
@@ -55,6 +57,7 @@ from aegis.workers.redis_tools import (
 )
 
 DispatcherFactory = Callable[[], INotificationDispatcher]
+AlertDispatcherFactory = Callable[[], ILiquidationAlertDispatcher]
 
 
 def _build_markets(
@@ -86,7 +89,11 @@ def _build_markets(
             log_rpc_urls=settings.log_rpc_urls_for(chain_name),
             log_rate_limiter=log_rate_limiter,
         )
-        oracle = ChainlinkNativePriceOracle(provider, chain.native_usd_feed)
+        oracle = ChainlinkNativePriceOracle(
+            provider,
+            chain.native_usd_feed,
+            max_age_seconds=chain.native_feed_heartbeat_seconds + STALENESS_MARGIN_SECONDS,
+        )
         deps = ProtocolDeps(native_oracle=oracle)
         providers[chain_name] = provider
         oracles[chain_name] = oracle
@@ -119,7 +126,9 @@ class Container:
     locks: RedisTaskLock
     deduplicator: RedisAlertDeduplicator
     status_reporter: StatusReporter
+    digest_reporter: MarketDigestReporter
     enricher: MarketEnricher
+    events: SqlLiquidationEventRepository
     uptime: SqlUptimeRepository
     closed: bool = field(default=False)
 
@@ -130,12 +139,15 @@ class Container:
         dispatcher_factory: DispatcherFactory,
         *,
         rpc_high_priority: bool = False,
+        alert_dispatcher_factory: AlertDispatcherFactory | None = None,
     ) -> Container:
         """Construct all services (no network I/O happens here).
 
         Args:
             settings: Application settings.
             dispatcher_factory: Builds the notification dispatcher.
+            alert_dispatcher_factory: Builds the 🐋 large liquidation alert dispatcher
+                (only the enrichment worker needs it).
             rpc_high_priority: True for the latency-critical watcher process: its RPC calls may
                 use the reserved part of the shared compute-unit budget.
         """
@@ -214,6 +226,9 @@ class Container:
             uptime,
             lag_window_seconds=settings.market_lag_window_minutes * 60,
             lag_min_gross_usd=settings.market_lag_min_gross_usd,
+            alerts=alert_dispatcher_factory() if alert_dispatcher_factory else None,
+            alert_min_net_usd=settings.market_alert_min_net_usd,
+            alert_max_age_seconds=settings.market_alert_max_age_minutes * 60,
         )
         return cls(
             settings=settings,
@@ -229,6 +244,7 @@ class Container:
             locks=RedisTaskLock(redis),
             deduplicator=deduplicator,
             enricher=enricher,
+            events=events,
             uptime=uptime,
             status_reporter=StatusReporter(
                 markets,
@@ -237,6 +253,7 @@ class Container:
                 lambda: heartbeat_age_seconds(redis),
                 hf_threshold=settings.watchlist_hf_threshold,
             ),
+            digest_reporter=MarketDigestReporter(events, threshold_usd=settings.min_profit_usd),
         )
 
     def market_names(self) -> dict[str, list[str]]:

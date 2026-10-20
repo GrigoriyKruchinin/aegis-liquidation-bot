@@ -4,63 +4,61 @@
 
 # Aegis Liquidations
 
-**A multi-chain liquidation bot platform for EVM Layer-2 networks.**
+**Liquidation analytics for lending markets on EVM Layer-2 networks.**
 
-It watches lending protocols on Base, Arbitrum and Optimism, finds under-collateralised loans as
-soon as they can be liquidated, prices the opportunity after gas, and alerts you on Telegram.
+Aegis tracks every borrower and every liquidation on Aave v3 and Compound v3 across Base,
+Arbitrum and Optimism. It values each liquidation at its block, measures how fast liquidators
+react, flags liquidatable positions in real time, and reports to Telegram.
 
 ![Python](https://img.shields.io/badge/python-3.12-3776AB?logo=python&logoColor=white)
 ![mypy](https://img.shields.io/badge/mypy-strict-2A6DB2)
 ![ruff](https://img.shields.io/badge/lint-ruff-D7FF64)
 ![Docker](https://img.shields.io/badge/docker-compose-2496ED?logo=docker&logoColor=white)
-![Status](https://img.shields.io/badge/V1-read--only%20detector-success)
+![Read-only](https://img.shields.io/badge/mode-read--only-success)
 
 </div>
 
 ---
 
-## What is this?
+## Background
 
 Lending protocols such as **Aave** and **Compound** let users borrow against collateral. Every
 position has a **health factor (HF)**: the risk-adjusted value of the collateral divided by the
-debt. When prices move and the HF drops **below 1**, anyone may *liquidate* the position. The
-liquidator repays part of the debt and receives the borrower's collateral at a discount: the
-**liquidation bonus**, typically 1–10%. This keeps the protocol solvent, and the liquidator keeps
-the spread.
+debt. When prices move and the HF drops **below 1**, anyone may *liquidate* the position: repay
+part of the debt and receive the borrower's collateral at a discount, the **liquidation bonus**
+(typically 1–10%).
 
-Liquidations are a race. A position becomes liquidatable in a specific block, and many bots
-compete for it. **Aegis** is built to win that race on L2s. Its job breaks into four steps:
+Liquidations are a competitive, mostly invisible market. Aegis makes it measurable:
 
-1. **Know every borrower.** It indexes protocol events and keeps a local database of all accounts
-   with debt.
-2. **Notice risk early.** Positions close to liquidation are re-checked on every block, and an
-   oracle price move triggers an immediate rescan of the whole market.
-3. **Price it honestly.** It computes the real liquidation terms of each protocol (close factor,
-   eMode bonus, protocol fee, dust rules) and subtracts gas, including the L1 data fee that L2s
-   charge.
-4. **Act.** In **V1** "act" means a rich Telegram alert. From **V2** the bot will execute the
-   liquidation itself through its own smart contract, with flash loans.
+- **How big is it?** Every liquidation is valued at the oracle prices of its own block:
+  debt repaid, collateral seized, gas (including the L1 data fee) and the liquidator's net profit.
+- **Who wins it?** Liquidator contracts are ranked by activity and profit, together with their
+  transaction position in the block and the number of sender addresses they use.
+- **How fast is it?** For each liquidation, a binary search over archive state finds the block
+  in which the position became liquidatable. A lag of 0 means it was liquidated in that very block.
+- **What is at risk right now?** Positions close to liquidation are re-checked every block, and a
+  Telegram alert fires as soon as one becomes profitably liquidatable.
 
-> **Current status: V1 — read-only detector.** It holds no private keys and never sends a
-> transaction. It is safe to run on your laptop and shows what Aegis sees.
+Aegis is strictly read-only: it holds no private keys and never sends a transaction.
 
 ## Features
 
 | | |
 |---|---|
-| 🌐 **Multi-chain** | Base, Arbitrum One and Optimism, one async provider per chain with RPC fallbacks |
-| 🏦 **Protocols** | Aave v3 (including eMode and the v3.3 close-factor and dust rules) and Compound v3 / Comet (absorb + `buyCollateral`) |
-| ⚡ **Low-latency watcher** | Synchronised with block production. Re-checks near-liquidation positions every block and starts a full rescan on any oracle move of 0.5% or more |
-| 💰 **Accurate profit** | Liquidation bonus minus gas. Gas covers L2 execution plus the L1 data fee (OP-stack `GasPriceOracle`, Arbitrum `NodeInterface`) and is priced in USD with Chainlink. All money math uses `int` wei and `Decimal`, never `float` |
-| 🔎 **Borrower indexer** | Checkpointed `eth_getLogs` indexing with adaptive chunk sizes and reorg safety |
-| 📦 **Batched reads** | Multicall3 everywhere: thousands of positions checked in a few RPC calls |
-| 🏁 **Competitor analysis** | Indexes every liquidation on the monitored markets: who did it, the profit after gas, the transaction position, and **how many blocks after the position became liquidatable** it was taken. Compares this with what our bot saw, to estimate our real chance before investing in V2 |
-| 🚦 **RPC budget** | A Redis token bucket shared by all services keeps usage under the provider's compute-unit limit, with a reserved share for the watcher |
-| 📨 **Telegram** | HTML alerts for every opportunity, a startup message and an hourly status report |
-| 🐳 **Dockerized** | One `make up-local`: Postgres, Redis, migrations, Celery workers, the watcher and beat, with healthchecks and a strict start order |
-| 🧱 **Clean architecture** | SOLID with strategy-pattern adapters. A new chain or protocol is a new class plus a registry entry. Fully typed (`mypy --strict`) and tested |
+| 🌐 **Multi-chain** | Base, Arbitrum One and Optimism; one async provider per chain with failover, retries and a return to the primary endpoint |
+| 🏦 **Protocols** | Aave v3 (eMode, v3.3 close factor and dust rules) and Compound v3 / Comet (`absorb` + `buyCollateral`) |
+| 🏁 **Liquidation index** | Every `LiquidationCall`, `AbsorbDebt`, `AbsorbCollateral` and `BuyCollateral` event, backfilled for 30 days and then followed live |
+| 💵 **Historical valuation** | USD values at the event's block, gas split per action inside multi-liquidation transactions, L1 data fee included |
+| ⏱️ **Liquidator speed** | Archive binary search for the block a position became liquidatable; partial-liquidation series and dust are excluded from speed statistics |
+| ⚡ **Real-time detector** | Block-synchronous watcher: re-checks near-liquidation positions every block and rescans a market on any oracle move ≥ 0.5% |
+| 💰 **Accurate estimates** | Protocol liquidation terms minus gas; money math uses `int` base units and `Decimal`, never `float` |
+| 📨 **Telegram** | Liquidatable position alerts, 🐋 large liquidation alerts, a 📈 daily market digest and a 📊 hourly status report |
+| 📑 **Reports** | `make market-report` → Markdown, JSON and CSV exports |
+| 🚦 **RPC budget** | Redis token bucket per provider key with separate shares for the watcher and background work; `eth_getLogs` routed to wide-range archive endpoints |
+| 🐳 **Dockerized** | Postgres, Redis, migrations, four Celery workers, the watcher and beat, with healthchecks and a strict start order |
+| 🧱 **Clean architecture** | SOLID with strategy-pattern adapters; fully typed (`mypy --strict`) and tested |
 
-## Supported markets (V1)
+## Supported markets
 
 | Network | Aave v3 | Compound v3 (Comet) |
 |---|---|---|
@@ -71,120 +69,155 @@ compete for it. **Aegis** is built to win that race on L2s. Its job breaks into 
 Contract addresses and their sources are documented in
 [`src/aegis/config/chains.py`](src/aegis/config/chains.py). Each one was verified on-chain.
 
+## Sample findings
+
+From a 31-day run (18 Sep – 19 Oct 2026; 8,884 indexed events, all paid liquidations enriched):
+
+| Market | Liquidations | Debt repaid | Liquidators' net |
+|---|---|---|---|
+| Arbitrum · Aave v3 | 242 | $541.4K | $33,048 |
+| Base · Aave v3 | 123 | $260.9K | $11,903 |
+| Optimism · Aave v3 | 387 | $266 | −$18 |
+| Compound v3 (all 9 markets) | 3,562 absorbs · 964 buys | $105 | $4 |
+
+- **Concentrated in time and size.** 75 liquidations earned ≥ $5 net ($44.9K in total). The three
+  largest made up 70% of it, and most of the volume fell on four or five volatile days.
+- **Same-block execution.** Every profitable liquidation with a measured lag (74 of 74) happened
+  in the block in which the position became liquidatable, typically at transaction index 1–6 on
+  Arbitrum. Liquidators react to the oracle update itself, not to the next block.
+- **A concentrated market.** A handful of contracts take most of the profit; the leading ones
+  operate on several networks at once from 10–12 sender addresses.
+- **Dust elsewhere.** Optimism Aave and all Comet markets saw thousands of tiny cleanup
+  liquidations with near-zero or negative net profit.
+
 ## What you get in Telegram
 
 <table>
 <tr>
 <td width="50%" valign="top">
 
-**🚨 Liquidation opportunity**
+**📈 Daily market digest**
 ```
-🚨 Liquidation Opportunity
+📈 Liquidation market · last 24h
+2026-10-15 09:00 → 2026-10-16 09:00 UTC
 ━━━━━━━━━━━━━━━━━━
-🌐 Network: Base
-🏦 Protocol: Aave v3 · Aave v3
-👤 Borrower: 0x1111…1111
-🔴 Health Factor: 0.9712
+🌐 Arbitrum One: 3 liquidations
+   · volume $37.9K · liquidators net $2,264.51
+🌐 Optimism: 11 liquidations
+   · volume $35 · liquidators net $1.31
 ━━━━━━━━━━━━━━━━━━
-💳 Debt to cover: 1,000 USDC (≈ $1,000.00)
-💎 Collateral: WETH (seize ≈ $1,050.00)
-🎁 Liquidation bonus: 5.00%
-⛽ Gas (L2 + L1 data): $0.0312
+🎯 Net ≥ $5.00: 3 · $2,264.51 in total
+⚡ Same-block liquidations: 3/3 (100%)
 ━━━━━━━━━━━━━━━━━━
-💰 Est. net profit: $44.97
+🏆 Largest liquidations
+1. $1,146.53 · Arbitrum One · Aave v3 · USDC/WBTC
+2. $653.34 · Arbitrum One · Aave v3 · WETH/USDC
+3. $464.63 · Arbitrum One · Aave v3 · USD₮0/ARB
+━━━━━━━━━━━━━━━━━━
+🥇 Top liquidators
+1. 0x5AC9…95bd · 1 liquidation · $1,146.53
+2. 0x3E7A…d288 · 1 liquidation · $653.34
+3. 0x9355…5fdb · 1 liquidation · $464.63
 ```
 
 </td>
 <td width="50%" valign="top">
 
-**📊 Hourly status report**
+**🐋 Large liquidation**
 ```
-📊 Aegis status · last 1h
+🐋 Large liquidation
 ━━━━━━━━━━━━━━━━━━
-🌐 Base
-  • Aave v3: 1840 borrowers · debt $212.4M
-    · ⚠️ 4 at risk · min HF 1.021 · ✅ synced
-🌐 Arbitrum One
-  • Aave v3: 5120 borrowers · debt $640.0M
-    · ⚠️ 11 at risk · ⏳ indexing, ~2h behind
+🌐 Network: Arbitrum One
+🏦 Market: Aave v3 · USDC/WBTC
+🤖 Liquidator: 0x5AC9…95bd
 ━━━━━━━━━━━━━━━━━━
-🔎 Opportunities: 0
-📨 Alerts sent: 0
-💓 Last scan: 4s ago
+💳 Debt repaid: $18,201.35
+⛽ Gas: $0.1505
+💰 Liquidator net: $1,146.53
+⚡ Speed: same block as it became
+   liquidatable · tx #1 in block
+━━━━━━━━━━━━━━━━━━
+🔗 Transaction · block 515068817
+🕒 2026-10-15 13:12:34 UTC
+```
+
+**🚨 Liquidatable position**
+```
+🚨 Liquidatable Position
+━━━━━━━━━━━━━━━━━━
+🌐 Network: Base
+🏦 Protocol: Aave v3 · Aave v3
+🔴 Health Factor: 0.9712
+💳 Debt to cover: 1,000 USDC (≈ $1,000.00)
+💎 Collateral: WETH (seize ≈ $1,050.00)
+⛽ Gas (L2 + L1 data): $0.0312
+💰 Est. liquidator net profit: $44.97
 ```
 
 </td>
 </tr>
 </table>
 
-## Roadmap
+The **📊 hourly status report** lists tracked borrowers and debt per market, positions close to
+liquidation, indexer progress, and the period's alerts and market liquidations, so a quiet chat
+still shows the system is alive.
 
-| Version | Scope | Status |
-|---|---|---|
-| **V1** | Read-only opportunity detector and Telegram alerts | ✅ done |
-| **V2** | `AegisLiquidator` smart contract; flash loans (Aave, Balancer, Equalizer) behind an `ALLOW_FLASH_LOANS` kill switch; a Dynamic Liquidity Router (self-fund → flash loan → skip); on-chain execution with simulation; competitive-latency work (Flashblocks, Timeboost, pre-signed txs); VPS deployment and CI/CD; daily and monthly reports | planned |
-| **V3** | FastAPI admin dashboard (auth, analytics, Chart.js); plugin system for more L2/L3 chains, DEX aggregators and lending protocols | planned |
-
-The detailed checklist is in [`todo.md`](todo.md).
-
-## How V1 works
+## Architecture
 
 ```
-                ┌──────────────┐  60s / 30s     ┌──────────────────────────┐
-                │ celery-beat  │ ─────────────▶ │ scanner (Celery, -Q scan) │
-                └──────────────┘                │ index : eth_getLogs → borrowers
-                                                │ full  : HF of all active borrowers
-                                                └──────────┬───────────────┘
-                ┌──────────────────────────┐               │
-                │ watcher (asyncio, 1/chain)│ every block:  │
-                │ • all oracle prices (1 multicall) → move ≥ 0.5% ⇒ immediate full rescan
-                │ • HF < 1.05 hot set re-check  │           │
-                └──────────────┬───────────┘               │
-              Multicall3 batched eth_call                  │ HF < 1 & net profit ≥ MIN_PROFIT_USD
-   Base / Arbitrum / Optimism RPC  ◀──────────────────────┤ Redis dedup (SET NX EX)
-                                                           ▼
-   ┌──────────┐   opportunities, borrowers,   ┌─────────────────────────┐   HTML message
-   │ Postgres │ ◀──── checkpoints ────────────│ notifier-worker (-Q notify) ─────────▶ Telegram
-   └──────────┘                               └─────────────────────────┘
+                 ┌──────────────┐
+                 │ celery-beat  │ schedules everything below
+                 └──────┬───────┘
+      ┌─────────────────┼──────────────────────┬──────────────────────┐
+      ▼                 ▼                      ▼                      ▼
+┌───────────┐   ┌───────────────┐   ┌──────────────────┐   ┌──────────────────┐
+│ scanner   │   │ market-worker │   │ enrich-worker    │   │ notifier-worker  │
+│ -Q scan   │   │ -Q market     │   │ -Q enrich        │   │ -Q notify        │
+│ borrowers │   │ liquidation   │   │ receipt, USD at  │   │ alerts, digest,  │
+│ + HF scan │   │ events index  │   │ block, gas, lag  │   │ status → Telegram│
+└─────┬─────┘   └───────┬───────┘   └────────┬─────────┘   └────────▲─────────┘
+      │                 │                    │ 🐋 large liquidation  │
+      │   ┌─────────────┴────────┐           └───────────────────────┤
+      │   │ watcher (1 loop/chain)│ every block: oracle prices +      │
+      │   │ hot set re-check      │ near-liquidation positions ───────┘
+      │   └─────────────┬────────┘
+      ▼                 ▼
+ Multicall3 eth_call · eth_getLogs (log-only archive endpoints) · receipts
+      │
+      ▼
+ ┌──────────┐  borrowers · checkpoints · opportunities · liquidation_events
+ │ Postgres │  sightings · uptime_minutes · notifications
+ └──────────┘
 ```
 
-1. **Borrower discovery.** The indexer scans `Borrow` events (Aave v3) and base `Withdraw` events (Comet) in adaptive `eth_getLogs` chunks. It checkpoints the last block for each market and stays `reorg_safety_blocks` behind the chain head.
-2. **Health scan.** The scanner batches `getUserAccountData` (Aave) and `isLiquidatable` + balances (Comet) through Multicall3. It stores the latest HF for each borrower. A full scan of all active borrowers runs every `SCAN_INTERVAL_SECONDS`.
-3. **Fast watcher (detection latency).** A dedicated asyncio service runs one loop per chain, synchronised with block production. After each block it sleeps about one block interval and then polls the head every `WATCHER_HEAD_POLL_MS` until the next block appears. On every new block it does two things concurrently:
-   - Reads every oracle price of all markets on the chain in **one** Multicall3 request. If any price has moved by `WATCHER_PRICE_MOVE_BPS` or more since the last snapshot, a full rescan of that market starts at once in the background.
-   - Re-checks the hot set: borrowers with an HF below `WATCHLIST_HF_THRESHOLD`.
+1. **Borrower discovery.** `Borrow` (Aave) and base `Withdraw` (Comet) events are indexed in
+   adaptive `eth_getLogs` chunks. The chunk size shrinks to what each endpoint accepts and is not
+   grown back into a rejected range. Checkpoints stay `reorg_safety_blocks` behind the head.
+2. **Health scan.** `getUserAccountData` (Aave) and `isLiquidatable` + balances (Comet) are
+   batched through Multicall3; a full scan of all active borrowers runs every
+   `SCAN_INTERVAL_SECONDS`.
+3. **Real-time watcher.** One asyncio loop per chain, synchronised with block production. On each
+   new block it reads every oracle price of the chain in **one** multicall (a move ≥
+   `WATCHER_PRICE_MOVE_BPS` triggers an immediate rescan) and re-checks borrowers with HF below
+   `WATCHLIST_HF_THRESHOLD`. It records which minutes it was online, so coverage statistics can
+   tell "not detected" from "offline".
+4. **Estimate and alert.**
+   - **Aave v3 (v3.3 rules):** close factor 50% of the *total* debt, 100% of the reserve debt when
+     HF < 0.95 or a leg is below $2k; partial liquidations must leave at least $1k; eMode or
+     reserve bonus minus the protocol fee.
+   - **Comet:** `absorb` followed by `buyCollateral` at
+     `storeFrontPriceFactor × (1 − liquidationFactor)`.
+   - **Gas:** protocol gas baseline × gas price (+20% margin) + L1 data fee (OP-stack
+     `GasPriceOracle`, Arbitrum `NodeInterface`), priced with Chainlink ETH/USD under a per-chain
+     staleness limit derived from the feed heartbeat.
 
-   The effective tick is `max(block time, WATCHER_MIN_INTERVAL_MS)`. That is every block on Base/Optimism (2 s) and 1 s on Arbitrum by default. Lowering it on Arbitrum costs more RPC requests. Run `make rpc-latency` to compare how fresh your RPC endpoints are. The freshest node should come first, because a node that serves new blocks late caps detection speed.
-4. **Profit estimate (self-funded).**
-   - **Aave v3 (v3.3 rules):**
-     - The close factor is 50% of the *total* debt. It rises to 100% of the reserve debt when HF < 0.95 or a leg is below $2k.
-     - Partial liquidations must leave at least $1k of debt and of collateral.
-     - The liquidation bonus comes from eMode when the user is in an eMode category and the collateral belongs to it; otherwise it is the reserve bonus. The protocol fee is deducted from the bonus.
-   - **Comet:** `absorb` followed by `buyCollateral` at `storeFrontPriceFactor × (1 − liquidationFactor)`.
-   - **Gas:** protocol gas baseline × gas price (+20% margin) + L1 data fee. The L1 fee comes from the OP-stack `GasPriceOracle` on Base/Optimism and from `NodeInterface.gasEstimateL1Component` on Arbitrum. It is priced in USD with Chainlink ETH/USD.
-5. **Alert.** If net profit ≥ `MIN_PROFIT_USD`, the opportunity is stored and the alert is queued. Redis prevents a repeat alert for the same borrower within `ALERT_DEDUP_TTL_SECONDS`.
-
-## Market & competitor analysis
-
-V1 is also a measurement tool. Before spending money on V2 infrastructure, it answers four questions: how big the opportunity really is, how fast competitors are, and whether we would have been first.
-
-- **Liquidation index.** A separate checkpointed event stream records Aave `LiquidationCall` and Comet `AbsorbDebt` / `AbsorbCollateral` / `BuyCollateral` events. On first start it backfills `MARKET_LOOKBACK_DAYS` and then follows the chain.
-- **Enrichment.** Each event is enriched with:
-  - the transaction sender and the liquidator contract;
-  - gas, including the L1 data fee, and the transaction position in the block;
-  - USD values at oracle prices of that block, and the liquidator's gross and net profit.
-
-  A binary search over historical state then finds **when the position became liquidatable**. A lag of 0 blocks means it was taken in the very block it became liquidatable: a back-run of the price update.
-- **Our sightings.** Every liquidatable position our bot sees is recorded, even below the alert threshold. The watcher also records which minutes it was online, so "missed" and "offline" stay distinct. This matters when running on a laptop.
-- **Report.** `make market-report DAYS=14` writes `data/market/report.md`, `report.json`, `liquidations.csv` and `sightings.csv`, which are git-ignored. The report covers:
-  - uptime;
-  - liquidations and profit per market, and the profit distribution;
-  - the top competitors with their share, speed and gas;
-  - lag buckets;
-  - our visibility (known borrower, seen first, lead time);
-  - the addressable pool projected to 30 days.
-
-The hourly Telegram status also shows the number of market liquidations and how much liquidators earned.
+   Positions with net profit ≥ `MIN_PROFIT_USD` are stored and alerted once per
+   `ALERT_DEDUP_TTL_SECONDS`.
+5. **Liquidation analytics.** A separate checkpointed stream indexes liquidation events. The
+   enrichment worker adds the receipt (sender, tx index, gas, L1 fee), USD values at the event's
+   block, the per-action gas share, the liquidation lag, follow-up detection, and whether the
+   detector had seen the position first. Paid liquidations are enriched before Comet bookkeeping
+   events, and transient RPC errors are retried while permanent gaps are recorded in `data_gaps`.
 
 ## Quickstart
 
@@ -194,25 +227,37 @@ For development you also need [uv](https://docs.astral.sh/uv/).
 
 ```bash
 cp .env.example .env      # fill TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, ALCHEMY_API_KEY, POSTGRES_PASSWORD
-make up-local             # build and start the stack
-make ps-local             # all services should become "healthy"
-make logs-local           # follow logs
-make rpc-latency          # optional: compare how fresh your RPC endpoints are
-make down-local
+make up                   # build and start the stack
+make ps                   # all services should become "healthy"
+make logs                 # follow logs
+make market-report DAYS=14
+make down
 ```
 
-The services start in a strict order:
+Start order:
 1. `postgres` and `redis` become healthy.
 2. `migrate` runs `alembic upgrade head` and exits.
-3. `scanner`, `notifier-worker` and `market-worker` start and pass `celery inspect ping`.
-4. `watcher` and `celery-beat` start. Each is reported healthy once it writes a heartbeat.
+3. `scanner`, `market-worker`, `enrich-worker` and `notifier-worker` pass `celery inspect ping`.
+4. `watcher` and `celery-beat` start and are healthy once they write a heartbeat.
 
-When the scanner is ready, it posts **🟢 Aegis scanner online** to Telegram. Every `STATUS_REPORT_INTERVAL_HOURS` it also posts a **📊 Aegis status** report. The report shows tracked borrowers and their debt, positions close to liquidation, indexer progress, and the opportunities and alerts of the period, so you can tell the bot is alive even when no liquidations occur.
+On the first run the indexers backfill 30 days of events. With the default public log endpoints
+this takes several hours; progress shows up in the `index_synced` log lines and in the status
+report.
 
-On the first run the indexer backfills `INDEXER_LOOKBACK_DAYS` of events. This takes from a few minutes to about an hour, depending on the RPC plan. Progress shows up in the `index_synced` log lines.
+## Market report
 
-> Profitable liquidations are rare in calm markets. A quiet Telegram does not mean the bot is
-> idle. Check the hourly status report.
+`make market-report DAYS=N` writes `data/market/report.md`, `report.json`, `liquidations.csv`
+and `sightings.csv`:
+
+- detector uptime per chain;
+- liquidations, debt repaid, gross and net profit per market, and the profit distribution;
+- the most active and the most profitable liquidator contracts (share, median lag, median tx
+  index, gas, chains, sender addresses);
+- liquidation speed buckets (same block, 1 block, 2–5, …) for all and for profitable liquidations;
+- detector coverage: known borrowers, positions detected before the liquidation, lead time;
+- the profit pool (Aave, net ≥ $5) projected to 30 days.
+
+The report reads only the database; no RPC or secrets are needed.
 
 ## Project layout
 
@@ -222,14 +267,14 @@ src/aegis/
   core/        domain models, interfaces, errors, ABI helpers, DI container
   chains/      EvmChainProvider, OP-stack / Arbitrum L1-fee providers, RPC cost accounting
   protocols/   Aave v3 and Compound v3 adapters (BaseLendingProtocol)
-  scanner/     event indexer, health-factor scanner, orchestrator, block-synchronous watcher
+  scanner/     event indexers, health-factor scanner, orchestrator, block-synchronous watcher
   estimator/   Chainlink native price oracle, gas estimator, profit estimator
+  market/      liquidation event stream, enrichment (valuation, gas, lag search)
+  reporting/   status report and daily market digest
   notifier/    Telegram notifier and HTML templates
-  reporting/   periodic status report
   workers/     Celery app and tasks, watcher service, Redis tools, healthchecks
   db/          SQLAlchemy models, repositories, session factory
-  market/      liquidation event stream, enrichment (gas, USD, lag search), coverage
-  tools/       operational CLIs (rpc_latency, market_report)
+  tools/       CLIs (market_report, rpc_latency)
 migrations/    Alembic
 docs/assets/   images used by the documentation
 tests/         unit (default) and integration (RUN_INTEGRATION=1)
@@ -242,60 +287,64 @@ make install       # uv sync --all-groups
 make check         # ruff format check + ruff lint + mypy --strict + pytest
 make test ARGS="tests/unit/test_aave_v3.py -k close_factor"
 
-# Integration tests: repositories + an anvil fork of Optimism
+# Integration tests: repositories against PostgreSQL + an anvil fork of Optimism
 # (Foundry: `curl -L https://foundry.paradigm.xyz | bash && foundryup`).
-# DB tests use an isolated `<POSTGRES_DB>_test` database on 127.0.0.1:5433 (`make up-local`),
-# never the bot's own data; they are skipped if PostgreSQL is unreachable.
+# DB tests use an isolated `<POSTGRES_DB>_test` database on 127.0.0.1:5433 (`make up`)
+# and are skipped if PostgreSQL is unreachable.
 make test-integration
 FORK_URL_OPTIMISM=https://opt-mainnet.g.alchemy.com/v2/<key> make test-integration ARGS=-k anvil
 ```
 
 Adding a chain or a lending protocol never touches the orchestrator:
-- **Chain:** add a `ChainConfig` to `aegis/config/chains.py`. If it needs a custom L1-fee provider, register one in `aegis/chains/__init__.py`.
-- **Protocol:** implement `BaseLendingProtocol`, then register a factory with `@PROTOCOLS.register("name")`.
+- **Chain:** add a `ChainConfig` to `aegis/config/chains.py`. If it needs a custom L1-fee
+  provider, register one in `aegis/chains/__init__.py`.
+- **Protocol:** implement `BaseLendingProtocol` (including the liquidation-event hooks), then
+  register a factory with `@PROTOCOLS.register("name")`.
 
 ## Configuration reference
 
-All settings come from environment variables or `.env`. See [`.env.example`](.env.example) for the full list.
+All settings come from environment variables or `.env`. See [`.env.example`](.env.example) for
+the full list.
 
 | Variable | Default | Description |
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | — (required) | Bot token from @BotFather |
 | `TELEGRAM_CHAT_ID` | — (required) | Target chat / group / channel id |
 | `ALCHEMY_API_KEY` | — | One key for Base, Arbitrum and OP Mainnet |
-| `BASE_RPC_URLS`, `ARBITRUM_RPC_URLS`, `OPTIMISM_RPC_URLS` | empty | Extra comma-separated RPC URLs. They are tried before Alchemy and act as fallbacks |
-| `BASE_LOG_RPC_URLS`, `ARBITRUM_LOG_RPC_URLS`, `OPTIMISM_LOG_RPC_URLS` | public archive nodes | Endpoints used only for `eth_getLogs`, tried before the main ones. Alchemy's free tier caps `eth_getLogs` at 10 blocks, which makes backfills impossible. The defaults are Tenderly's public Base gateway, `arb1.arbitrum.io` and `mainnet.optimism.io`. An empty value disables them |
-| `RPC_LOG_CU_PER_SECOND` | `150` | Budget per log-only endpoint, in the same units as `RPC_CU_PER_SECOND` |
+| `BASE_RPC_URLS`, `ARBITRUM_RPC_URLS`, `OPTIMISM_RPC_URLS` | empty | Extra comma-separated RPC URLs, tried before Alchemy, acting as fallbacks |
+| `BASE_LOG_RPC_URLS`, `ARBITRUM_LOG_RPC_URLS`, `OPTIMISM_LOG_RPC_URLS` | public archive nodes | Endpoints used only for `eth_getLogs`, tried before the main ones (Alchemy's free tier caps `eth_getLogs` at 10 blocks). Defaults: Tenderly's public Base gateway, `arb1.arbitrum.io`, `mainnet.optimism.io`. An empty value disables them |
+| `RPC_CU_PER_SECOND` | `300` | Throughput budget per provider key in compute units/s, across all chains and services (Redis token bucket, prevents HTTP 429). Set it to about 80% of your plan's CUPS and within the monthly quota; `0` disables it |
+| `RPC_RESERVE_PCT` | `30` | Share of the budget dedicated to the watcher; background work gets the rest. Separate buckets, so neither side can starve the other |
+| `RPC_LOG_CU_PER_SECOND` | `150` | Budget per log-only endpoint |
+| `RPC_TIMEOUT_SECONDS` / `RPC_MAX_RETRIES` / `RPC_MAX_CONCURRENCY` | `15` / `3` / `8` | RPC resilience |
 | `ENABLED_CHAINS` | `base,arbitrum,optimism` | Chains to monitor |
-| `MIN_PROFIT_USD` | `5` | Minimum net profit (after gas) to alert |
+| `MIN_PROFIT_USD` | `5` | Net profit (after gas) from which a liquidatable position is alerted; also the digest's "meaningful" threshold |
 | `WATCHLIST_HF_THRESHOLD` | `1.05` | HF below which the watcher re-checks a borrower on every block |
 | `MIN_DEBT_USD` | `10` | Dust filter |
-| `INDEX_INTERVAL_SECONDS` / `SCAN_INTERVAL_SECONDS` | `60` / `30` | Indexer and full-scan schedules |
-| `WATCHER_MIN_INTERVAL_MS` | `1000` | Minimum time between watcher ticks. The effective tick is `max(block time, this)` |
-| `WATCHER_HEAD_POLL_MS` | `200` | Head polling period while the watcher waits for the next block |
-| `WATCHER_PRICE_MOVE_BPS` / `WATCHER_RESCAN_COOLDOWN_SECONDS` | `50` / `5` | Oracle price move that triggers an immediate full rescan, and the cooldown between such rescans |
-| `INDEXER_LOOKBACK_DAYS` | `30` | First-run backfill window |
-| `INDEXER_LOG_CHUNK_BLOCKS` | `10000` | Initial `eth_getLogs` range. It shrinks to what the endpoint accepts and is not grown back into a rejected range |
-| `ALERT_DEDUP_TTL_SECONDS` | `3600` | Suppress repeat alerts for the same borrower |
-| `STATUS_REPORT_INTERVAL_HOURS` | `1` | Periodic 📊 status report to Telegram (`0` disables it) |
-| `RPC_TIMEOUT_SECONDS` / `RPC_MAX_RETRIES` / `RPC_MAX_CONCURRENCY` | `15` / `3` / `8` | RPC resilience |
-| `RPC_CU_PER_SECOND` | `300` | Shared throughput budget per provider key, in compute units/s, across all chains and services. It is enforced with a Redis token bucket and prevents HTTP 429. Set it to about 80% of your plan's CUPS; `0` disables it |
-| `MARKET_ENABLED` / `MARKET_LOOKBACK_DAYS` | `true` / `30` | Competitor-analysis indexing and its first-run backfill window |
-| `MARKET_INDEX_INTERVAL_SECONDS` / `MARKET_ENRICH_INTERVAL_SECONDS` | `300` / `120` | How often new liquidations are indexed and enriched |
-| `MARKET_LAG_WINDOW_MINUTES` | `120` | How far back the archive search looks for the start of a liquidatable window |
-| `RPC_RESERVE_PCT` | `30` | Share of the budget dedicated to the watcher. Background work (indexers, scans, market enrichment) gets the rest. The two shares are separate buckets, so neither side can starve the other |
+| `INDEX_INTERVAL_SECONDS` / `SCAN_INTERVAL_SECONDS` | `60` / `30` | Borrower indexer and full-scan schedules |
+| `INDEXER_LOOKBACK_DAYS` / `INDEXER_LOG_CHUNK_BLOCKS` | `30` / `10000` | Borrower backfill window and initial `eth_getLogs` range |
+| `WATCHER_MIN_INTERVAL_MS` / `WATCHER_HEAD_POLL_MS` | `1000` / `200` | Minimum time between watcher ticks; head polling period |
+| `WATCHER_PRICE_MOVE_BPS` / `WATCHER_RESCAN_COOLDOWN_SECONDS` | `50` / `5` | Oracle move that triggers a full rescan; cooldown between rescans |
+| `ALERT_DEDUP_TTL_SECONDS` | `3600` | Suppress repeat alerts for the same position |
+| `STATUS_REPORT_INTERVAL_HOURS` | `1` | 📊 status report period (`0` disables it) |
+| `MARKET_ENABLED` / `MARKET_LOOKBACK_DAYS` | `true` / `30` | Liquidation analytics and its backfill window |
+| `MARKET_INDEX_INTERVAL_SECONDS` / `MARKET_ENRICH_INTERVAL_SECONDS` | `300` / `120` | How often liquidations are indexed and enriched |
+| `MARKET_LAG_WINDOW_MINUTES` / `MARKET_LAG_MIN_GROSS_USD` | `120` / `1` | Archive search window for the liquidation lag; dust below this gross profit skips the search |
+| `MARKET_DIGEST_HOUR_UTC` | `9` | Hour of the 📈 daily digest (`-1` disables it) |
+| `MARKET_ALERT_MIN_NET_USD` / `MARKET_ALERT_MAX_AGE_MINUTES` | `500` / `60` | 🐋 alert threshold (`0` disables it); older (backfilled) liquidations never alert |
 | `POSTGRES_*`, `REDIS_URL` | local defaults | Overridden by docker-compose for containers |
 
-## Security notes
+## Security
 
-- Secrets are `SecretStr` values. RPC URLs and bot tokens are redacted from all logs and errors.
-- `.env` is git-ignored. `.env.example` holds placeholders only.
-- Containers run as a non-root user. Postgres is published only on `127.0.0.1:5433`.
-- Least privilege in compose: only `scanner`, `notifier-worker`, `market-worker` and `watcher` receive the full `.env`. `postgres`, `migrate` and `celery-beat` get only the variables they need (`DatabaseSettings` / `SchedulerSettings`).
-- V1 never loads a private key. V2 adds execution behind a hard `ALLOW_FLASH_LOANS` toggle, with mandatory `eth_call` simulation before every transaction.
+- Read-only by design: no private keys, no signer, no transaction sending.
+- Secrets are `SecretStr` values; RPC URLs and bot tokens are redacted from all logs and errors.
+- `.env` is git-ignored; `.env.example` holds placeholders only.
+- Containers run as a non-root user; Postgres is published only on `127.0.0.1:5433`.
+- Least privilege in compose: only the application services receive the full `.env`;
+  `postgres`, `migrate` and `celery-beat` get only the variables they need.
+- Every dynamic value in Telegram messages is HTML-escaped; alerts are idempotent.
 
 ## Disclaimer
 
-This software is provided for research and educational purposes. It is not financial advice.
-Profit estimates are approximations, and on-chain execution (V2) carries real risk of loss. Use
-at your own risk.
+Aegis is an analytics tool. Its figures are estimates derived from on-chain data and oracle
+prices; nothing in it is financial advice.

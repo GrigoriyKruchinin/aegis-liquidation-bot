@@ -59,25 +59,25 @@ def test_summarize_figures() -> None:
     assert summary["uptime"]["base"]["pct"] == 50.0
     aave = summary["markets"]["base · Aave v3"]
     assert aave["liquidations"] == 3 and aave["gross_usd"] == Decimal(102)
-    top = summary["competitors"][0]
+    top = summary["liquidators"][0]
     assert top["liquidator"] == "0x" + "c1" * 20 and top["count"] == 3
     lags = {b["bucket"]: b["count"] for b in summary["lag"]["buckets"]}
     assert lags["same block (0)"] == 1 and lags["2-5 blocks"] == 1
     assert lags["already liquidatable at window start (capped)"] == 1
-    visibility = summary["our_visibility"]
-    assert visibility["seen_before_liquidation"] == 1 and visibility["median_lead_seconds"] == 4
-    addressable = summary["addressable"]
-    assert addressable["aave_liquidations_net_ge_5"] == 2
-    assert addressable["seen_first_by_us"] == 1
-    assert addressable["projected_30d_net_usd"] > addressable["net_usd"]
+    coverage = summary["detector_coverage"]
+    assert coverage["detected_before_liquidation"] == 1 and coverage["median_lead_seconds"] == 4
+    pool = summary["profit_pool"]
+    assert pool["aave_liquidations_net_ge_5"] == 2
+    assert pool["detected_first"] == 1
+    assert pool["projected_30d_net_usd"] > pool["net_usd"]
     assert summary["sightings"]["by_outcome"] == {"liquidated": 1}
 
 
 def test_markdown_and_json_render() -> None:
     summary = summarize(_data())
     text = render_markdown(summary)
-    assert "# Aegis market report" in text and "## Competitors" in text
-    assert "same block (0)" in text and "Seen first by us" in text
+    assert "# Aegis market report" in text and "## Liquidators" in text
+    assert "same block (0)" in text and "Detected before the liquidation" in text
     assert json.loads(json.dumps(summary, default=_jsonable))["events"]["total"] == 5
 
 

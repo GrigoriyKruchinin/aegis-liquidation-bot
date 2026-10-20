@@ -71,10 +71,12 @@ class SchedulerSettings(_EnvSettings):
     scan_interval_seconds: int = Field(default=30, ge=5)
     #: Periodic "bot is alive" Telegram report; 0 disables it.
     status_report_interval_hours: int = Field(default=1, ge=0, le=168)
-    #: Market measurement: index competitors' liquidations and analyse them.
+    #: Market analytics: index every liquidation on the monitored markets and analyse it.
     market_enabled: bool = True
     market_index_interval_seconds: int = Field(default=300, ge=30)
     market_enrich_interval_seconds: int = Field(default=120, ge=30)
+    #: Hour (UTC) of the daily 📈 market digest in Telegram; -1 disables it.
+    market_digest_hour_utc: int = Field(default=9, ge=-1, le=23)
 
     @field_validator("enabled_chains", mode="before")
     @classmethod
@@ -96,7 +98,7 @@ class SchedulerSettings(_EnvSettings):
 class AppSettings(DatabaseSettings, SchedulerSettings):
     """Full configuration for scanner and notifier workers.
 
-    All secrets are `SecretStr` and must never be logged. V1 loads no private keys.
+    All secrets are `SecretStr` and must never be logged. The application never loads private keys.
     """
 
     # --- Telegram ----------------------------------------------------------------------------
@@ -150,6 +152,10 @@ class AppSettings(DatabaseSettings, SchedulerSettings):
     market_enrich_batch: int = Field(default=25, ge=1, le=500)
     #: Dust liquidations below this gross profit skip the archive lag search (saves RPC).
     market_lag_min_gross_usd: Decimal = Field(default=Decimal(1), ge=0)
+    #: 🐋 Telegram alert for every liquidation with at least this net profit; 0 disables it.
+    market_alert_min_net_usd: Decimal = Field(default=Decimal(500), ge=0)
+    #: Only alert on liquidations younger than this (backfilled history never alerts).
+    market_alert_max_age_minutes: int = Field(default=60, ge=1, le=24 * 60)
     indexer_lookback_days: int = Field(default=30, ge=1)
     indexer_log_chunk_blocks: int = Field(default=10_000, ge=1)
     indexer_max_blocks_per_run: int = Field(default=200_000, ge=1)

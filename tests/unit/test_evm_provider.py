@@ -273,3 +273,57 @@ def test_log_url_equal_to_main_url_is_ignored() -> None:
         BASE, [url], log_rpc_urls=[SecretStr("https://rpc.example/v2/KEY/")]
     )
     assert len(provider._clients) == 1
+
+
+async def test_returns_to_primary_after_retry_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("aegis.core.retry.asyncio.sleep", _no_sleep)
+    clock = [1000.0]
+    monkeypatch.setattr("aegis.chains.evm.time.monotonic", lambda: clock[0])
+    primary = FakeClient([OSError("down"), OSError("down"), 1])
+    fallback = FakeClient([2])
+    provider = make_provider(primary, fallback)
+    assert await provider.block_number() == 2  # primary down: failed over
+    clock[0] += 30
+    assert await provider.block_number() == 2  # still within the window: stays on fallback
+    assert primary.eth.calls == 2
+    clock[0] += 31
+    assert await provider.block_number() == 1  # window elapsed: primary is tried again
+
+
+async def test_semaphore_not_held_during_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+
+    provider = make_provider(FakeClient([OSError("reset"), 5]))
+    held: list[bool] = []
+
+    async def observing_sleep(_: float) -> None:
+        held.append(provider._semaphore.locked())
+
+    monkeypatch.setattr("aegis.core.retry.asyncio.sleep", observing_sleep)
+    provider._semaphore = asyncio.Semaphore(1)
+    assert await provider.block_number() == 5
+    assert held == [False]
+
+
+async def test_primary_probe_is_a_single_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("aegis.core.retry.asyncio.sleep", _no_sleep)
+    clock = [1000.0]
+    monkeypatch.setattr("aegis.chains.evm.time.monotonic", lambda: clock[0])
+    primary, fallback = FakeClient([OSError("down")]), FakeClient([2])
+    provider = make_provider(primary, fallback)
+    assert await provider.block_number() == 2
+    assert primary.eth.calls == 2  # full retry cycle on the first failure
+    clock[0] += 61
+    assert await provider.block_number() == 2
+    assert primary.eth.calls == 3  # the probe tried the dead primary once, then failed over
+    assert await provider.block_number() == 2
+    assert primary.eth.calls == 3  # probe window restarted: no new attempt yet
+
+
+def test_late_fallback_success_does_not_undo_return_to_primary() -> None:
+    provider = make_provider(FakeClient([1]), FakeClient([2]))
+    provider._active["default"] = 1
+    started_on_fallback = provider._generation["default"]
+    provider._on_success("default", 0, started_on_fallback)  # a probe returned to the primary
+    provider._on_success("default", 1, started_on_fallback)  # an older request finishes late
+    assert provider._active["default"] == 0

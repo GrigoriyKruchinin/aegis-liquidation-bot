@@ -43,6 +43,32 @@ class FakeReporter:
         return StatusReport(datetime.now(UTC), period_hours, (), ActivityStats(0, None, 0, 0), None)
 
 
+class FakeEvents:
+    def __init__(self) -> None:
+        from tests.unit.test_digest import _record
+
+        self.records = {1: _record()}
+
+    async def get_record(self, event_id: int) -> Any:
+        if event_id not in self.records:
+            raise NotFoundError(str(event_id))
+        return self.records[event_id]
+
+
+class FakeDigestReporter:
+    async def build(self, hours: int = 24) -> Any:
+        from datetime import timedelta
+        from decimal import Decimal
+
+        from aegis.reporting.digest import summarize_market
+        from tests.unit.test_digest import NOW, RECORDS
+
+        return summarize_market(
+            RECORDS, since=NOW - timedelta(hours=hours), until=NOW, pending=0,
+            threshold_usd=Decimal(5),
+        )  # fmt: skip
+
+
 @dataclass
 class FakeContainer:
     notifier: FakeNotifier = field(default_factory=FakeNotifier)
@@ -51,6 +77,8 @@ class FakeContainer:
     deduplicator: MemoryDeduplicator = field(default_factory=MemoryDeduplicator)
     redis: fakeredis.FakeAsyncRedis = field(default_factory=fakeredis.FakeAsyncRedis)
     status_reporter: FakeReporter = field(default_factory=lambda: FakeReporter())
+    events: FakeEvents = field(default_factory=FakeEvents)
+    digest_reporter: FakeDigestReporter = field(default_factory=FakeDigestReporter)
     settings: SimpleNamespace = field(
         default_factory=lambda: SimpleNamespace(status_report_interval_hours=6)
     )
@@ -79,7 +107,7 @@ def test_notify_sends_and_records(container: FakeContainer) -> None:
     asyncio.run(container.opportunities.add(summary()))
     _apply(1)
     assert len(container.notifier.sent) == 1
-    assert "Liquidation Opportunity" in container.notifier.sent[0]
+    assert "Liquidatable Position" in container.notifier.sent[0]
     assert container.notifications.records == [(1, "telegram", "sent")]
 
 
@@ -141,4 +169,31 @@ def test_notify_status_sends_report(container: FakeContainer) -> None:
     tasks.notify_status.apply(throw=True)
     assert "Aegis status" in container.notifier.sent[0]
     assert "last 6h" in container.notifier.sent[0]
+    assert container.notifications.records == [(None, "telegram", "sent")]
+
+
+def test_notify_liquidation_sends_once(container: FakeContainer) -> None:
+    tasks.notify_liquidation.apply(args=(1,), throw=True)
+    tasks.notify_liquidation.apply(args=(1,), throw=True)  # redelivery is a no-op
+    assert len(container.notifier.sent) == 1 and "Large liquidation" in container.notifier.sent[0]
+    assert container.notifications.records == [(None, "telegram", "sent")]
+
+
+def test_notify_liquidation_missing_event_is_dropped(container: FakeContainer) -> None:
+    tasks.notify_liquidation.apply(args=(99,), throw=True)
+    assert container.notifier.sent == []
+
+
+def test_notify_liquidation_retries_on_failure(container: FakeContainer) -> None:
+    container.notifier.error = NotificationError("boom")
+    with pytest.raises(Retry):
+        tasks.notify_liquidation.apply(args=(1,), throw=True)
+    assert container.notifications.records == [(None, "telegram", "failed")]
+
+
+def test_notify_digest_once_per_day(container: FakeContainer) -> None:
+    tasks.notify_digest.apply(throw=True)
+    tasks.notify_digest.apply(throw=True)  # redelivered after a worker crash
+    assert len(container.notifier.sent) == 1
+    assert "Liquidation market" in container.notifier.sent[0]
     assert container.notifications.records == [(None, "telegram", "sent")]

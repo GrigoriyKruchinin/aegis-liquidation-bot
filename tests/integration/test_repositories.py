@@ -1,7 +1,7 @@
 """Repository tests against a real PostgreSQL (migrated schema).
 
 Uses the isolated ``<POSTGRES_DB>_test`` database from `tests/integration/conftest.py`.
-Run with `make up-local` (Postgres on 127.0.0.1:5433) and then `make test-integration`.
+Run with `make up` (Postgres on 127.0.0.1:5433) and then `make test-integration`.
 """
 
 from __future__ import annotations
@@ -188,6 +188,39 @@ async def test_market_measurement_repositories(sessions: async_sessionmaker[Asyn
     assert activity.market_liquidations == 1
     assert activity.market_gross_usd == Decimal(50)
     assert activity.market_seen_first == 1
+
+    record = await events.get_record(event_id)
+    assert record.net_profit_usd == Decimal("49.98") and record.tx_index == 3
+    assert record.debt_symbol == "USDC" and record.lag_blocks == 2
+    window = await events.enriched_between(now - timedelta(minutes=1), now + timedelta(minutes=1),
+                                           ("aave_liquidation",))  # fmt: skip
+    assert [r.id for r in window] == [event_id]
+    assert await events.enriched_between(now - timedelta(minutes=1), now, ("comet_buy",)) == []
+    assert await events.pending_count() == 0
+
+
+async def test_paid_liquidations_enriched_first(
+    sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    from aegis.core.errors import NotFoundError
+    from aegis.core.models import LiquidationEvent
+    from aegis.db.repositories import SqlLiquidationEventRepository
+
+    events = SqlLiquidationEventRepository(sessions)
+    absorb = LiquidationEvent(
+        MARKET, "comet_absorb", "0x" + "c1" * 32, 0, 10, "0x" + "d1" * 20, "0x" + "9a" * 20,
+        "0x" + "01" * 20, None, 1, 0,
+    )  # fmt: skip
+    paid = LiquidationEvent(
+        MARKET, "aave_liquidation", "0x" + "c2" * 32, 0, 900, "0x" + "d2" * 20,
+        "0x" + "9a" * 20, "0x" + "01" * 20, "0x" + "02" * 20, 1, 1,
+    )  # fmt: skip
+    await events.add([absorb, paid])
+    first = await events.pending(1, 5)
+    assert first[0][2].kind == "aave_liquidation"  # newer, but paid: goes first
+    assert await events.pending_count() == 2
+    with pytest.raises(NotFoundError):
+        await events.get_record(first[0][0])  # not enriched yet
 
 
 async def test_liquidation_events_bulk_insert(sessions: async_sessionmaker[AsyncSession]) -> None:

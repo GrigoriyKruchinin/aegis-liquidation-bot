@@ -21,8 +21,8 @@ SYNCED_LAG_SECONDS = 300
 
 
 def render_startup(markets_by_chain: Mapping[str, list[str]], min_profit_usd: Decimal) -> str:
-    """🟢 Scanner online message listing monitored markets."""
-    lines = ["🟢 <b>Aegis scanner online</b>", SEPARATOR]
+    """🟢 Analyzer online message listing monitored markets."""
+    lines = ["🟢 <b>Aegis analyzer online</b>", SEPARATOR]
     for chain_name, markets in markets_by_chain.items():
         chain = CHAINS.get(chain_name)
         title = chain.display_name if chain else chain_name
@@ -30,7 +30,7 @@ def render_startup(markets_by_chain: Mapping[str, list[str]], min_profit_usd: De
     lines += [
         SEPARATOR,
         f"🎯 <b>Alert threshold:</b> net profit ≥ {esc(usd(min_profit_usd))}",
-        "<blockquote>Mode: read-only detector (V1). No transactions are sent.</blockquote>",
+        "<blockquote>Mode: read-only analytics. No transactions are ever sent.</blockquote>",
     ]
     return "\n".join(lines)
 
@@ -88,12 +88,12 @@ def render_status(report: StatusReport) -> str:
         f"📨 <b>Alerts sent:</b> {activity.alerts_sent}{failed}",
         f"🏁 <b>Market liquidations:</b> {activity.market_liquidations}"
         f" · liquidators earned {esc(usd(activity.market_gross_usd))}"
-        f" · seen by us first: {activity.market_seen_first}",
+        f" · detected first: {activity.market_seen_first}",
         f"💓 <b>Last scan:</b> {scan}",
         "<blockquote>"
         f"Tracking {borrowers} borrowers with {esc(compact_usd(debt))} of debt; "
         f"{at_risk} close to liquidation. "
-        "No alert means nothing profitable was liquidatable."
+        "No alert means no position was profitably liquidatable."
         "</blockquote>",
     ]
     return "\n".join(lines)

@@ -1,17 +1,15 @@
 ---
 name: run-tests
-description: Run the Aegis Liquidations test suite (pytest unit tests, optional integration tests on an anvil fork, and Foundry contract tests) and report results. Use when asked to run tests or after implementing a task.
+description: Run the Aegis Liquidations test suite (pytest unit tests and optional integration tests against PostgreSQL and an anvil fork) and report results. Use when asked to run tests or after implementing a change.
 ---
 
 # run-tests
 
-Arguments (optional): a test path, `-k` expression, or `integration` / `contracts` / `all`.
+Arguments (optional): a test path, `-k` expression, or `integration` / `all`.
 
 1. Unit tests (default):
    ```
    make test ARGS="<path or -k expr>"
    ```
-   Fallback without Makefile: `uv run pytest <args>`.
-2. `integration` or `all`: run `RUN_INTEGRATION=1 uv run pytest -m integration`. Requires `anvil` and fork RPC URLs in `.env`; if missing, say so instead of pretending it passed.
-3. `contracts` or `all` (only if `contracts/` exists): `make contracts-test` (`forge test -vvv`).
-4. Report: passed / failed / skipped counts per suite. For each failure, paste the assertion and traceback tail verbatim and point to `file:line`. Do not mark a `todo.md` item done while tests fail.
+2. `integration` or `all`: `make test-integration`. It needs PostgreSQL on `127.0.0.1:5433` (`make up`) and, for the fork test, `anvil` plus `FORK_URL_OPTIMISM`. If a prerequisite is missing, say which tests were skipped instead of pretending they passed.
+3. Report: passed / failed / skipped counts per suite. For each failure, paste the assertion and traceback tail verbatim and point to `file:line`.

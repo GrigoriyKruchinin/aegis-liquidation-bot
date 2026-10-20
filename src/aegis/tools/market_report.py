@@ -1,4 +1,4 @@
-"""Market / competitor report from the measurement data collected by V1.
+"""Liquidation market report built from the collected analytics data.
 
 Usage (inside the stack, see ``make market-report``)::
 
@@ -193,14 +193,14 @@ def summarize(data: Data) -> dict[str, Any]:
              "net_usd": sum((_d(e.net_profit_usd) for e in selected), Decimal(0))}
         )  # fmt: skip
 
-    competitors: dict[str, dict[str, Any]] = defaultdict(
+    liquidators: dict[str, dict[str, Any]] = defaultdict(
         lambda: {"count": 0, "gross_usd": Decimal(0), "lags": [], "tx_index": [], "gas": [],
                  "chains": set(), "senders": Counter()}
     )  # fmt: skip
     for event in enriched:
         if event.kind not in (*LIQUIDATION_KINDS, "comet_buy"):
             continue
-        comp = competitors[event.liquidator]
+        comp = liquidators[event.liquidator]
         comp["count"] += 1
         comp["gross_usd"] += _d(event.gross_profit_usd) if event.kind in PROFIT_KINDS else 0
         comp["chains"].add(event.chain)
@@ -212,13 +212,13 @@ def summarize(data: Data) -> dict[str, Any]:
             comp["tx_index"].append(event.tx_index)
         if event.gas_cost_usd is not None:
             comp["gas"].append(float(event.gas_cost_usd))
-    total_actions = sum(c["count"] for c in competitors.values()) or 1
-    top = sorted(competitors.items(), key=lambda kv: kv[1]["count"], reverse=True)[:15]
-    top_by_profit = sorted(competitors.items(), key=lambda kv: kv[1]["gross_usd"], reverse=True)[
+    total_actions = sum(c["count"] for c in liquidators.values()) or 1
+    top = sorted(liquidators.items(), key=lambda kv: kv[1]["count"], reverse=True)[:15]
+    top_by_profit = sorted(liquidators.items(), key=lambda kv: kv[1]["gross_usd"], reverse=True)[
         :10
     ]
 
-    # Follow-ups (partial-liquidation series) share the first event's window: not a race.
+    # Follow-ups (partial-liquidation series) share the first event's window: no own lag.
     lag_events = [e for e in liquidations if e.lag_blocks is not None and not e.follow_up]
     lag_rows = _lag_buckets(lag_events)
     meaningful = [e for e in lag_events if _d(e.net_profit_usd) >= MEANINGFUL_NET_USD]
@@ -233,13 +233,15 @@ def summarize(data: Data) -> dict[str, Any]:
     with_borrower = [e for e in liquidations if e.borrower]
     online = [e for e in with_borrower if e.bot_online]
     known = [e for e in online if e.borrower_known]
-    seen_first = [e for e in online if e.our_lead_seconds is not None and e.our_lead_seconds > 0]
-    leads = [float(e.our_lead_seconds) for e in seen_first if e.our_lead_seconds is not None]
-    addressable = [
+    detected_first = [
+        e for e in online if e.our_lead_seconds is not None and e.our_lead_seconds > 0
+    ]
+    leads = [float(e.our_lead_seconds) for e in detected_first if e.our_lead_seconds is not None]
+    pool = [
         e for e in enriched
         if e.kind == "aave_liquidation" and _d(e.net_profit_usd) >= 5
     ]  # fmt: skip
-    addressable_seen = [e for e in addressable if e in seen_first]
+    pool_detected = [e for e in pool if e in detected_first]
     days = max(1e-9, (data.until - data.since).total_seconds() / 86400)
 
     sighting_reasons = Counter(s.closed_reason or ("open" if not s.closed else "?")
@@ -260,7 +262,7 @@ def summarize(data: Data) -> dict[str, Any]:
                         "max_gross_usd": max(row["gross_values"], default=None)}
                     for k, row in sorted(per_market.items())},
         "profit_buckets": buckets,
-        "competitors": [
+        "liquidators": [
             {"liquidator": addr, "count": c["count"],
              "share_pct": round(100 * c["count"] / total_actions, 1),
              "gross_usd": c["gross_usd"], "median_lag_blocks": _median(c["lags"]),
@@ -272,24 +274,26 @@ def summarize(data: Data) -> dict[str, Any]:
         ],
         "lag": {"buckets": lag_rows, "buckets_net_ge_5": lag_rows_meaningful,
                 "median_seconds_by_chain": lag_seconds_by_chain},
-        "competitors_by_profit": [
+        "liquidators_by_profit": [
             {"liquidator": addr, "gross_usd": c["gross_usd"], "count": c["count"],
              "median_lag_blocks": _median(c["lags"]), "chains": sorted(c["chains"])}
             for addr, c in top_by_profit
         ],
-        "our_visibility": {
+        "detector_coverage": {
             "liquidations_with_borrower": len(with_borrower),
-            "while_bot_online": len(online),
+            "while_detector_online": len(online),
             "borrower_known": len(known),
-            "seen_before_liquidation": len(seen_first),
+            "detected_before_liquidation": len(detected_first),
             "median_lead_seconds": _median(leads),
         },
-        "addressable": {
-            "aave_liquidations_net_ge_5": len(addressable),
-            "net_usd": sum((_d(e.net_profit_usd) for e in addressable), Decimal(0)),
-            "seen_first_by_us": len(addressable_seen),
-            "seen_first_net_usd": sum((_d(e.net_profit_usd) for e in addressable_seen), Decimal(0)),
-            "projected_30d_net_usd": sum((_d(e.net_profit_usd) for e in addressable), Decimal(0))
+        "profit_pool": {
+            "aave_liquidations_net_ge_5": len(pool),
+            "net_usd": sum((_d(e.net_profit_usd) for e in pool), Decimal(0)),
+            "detected_first": len(pool_detected),
+            "detected_first_net_usd": sum(
+                (_d(e.net_profit_usd) for e in pool_detected), Decimal(0)
+            ),
+            "projected_30d_net_usd": sum((_d(e.net_profit_usd) for e in pool), Decimal(0))
             * Decimal(30) / Decimal(str(days)),
         },
         "sightings": {"episodes": len(data.sightings), "by_outcome": dict(sighting_reasons),
@@ -316,7 +320,7 @@ def render_markdown(summary: dict[str, Any]) -> str:
         )
     out.append("")
 
-    out.append("## Bot uptime (watcher)")
+    out.append("## Detector uptime (watcher)")
     if s["uptime"]:
         out.append("| Chain | Online minutes | Coverage |\n|---|---|---|")
         out += [f"| {c} | {u['minutes']} | {u['pct']}% |" for c, u in s["uptime"].items()]
@@ -345,12 +349,12 @@ def render_markdown(summary: dict[str, Any]) -> str:
     out += [f"| {b['bucket']} | {b['count']} | {_usd(b['net_usd'])} |" for b in s["profit_buckets"]]
     out.append("")
 
-    out.append("## Competitors (top liquidator contracts)")
+    out.append("## Liquidators (most active contracts)")
     out.append(
         "| Liquidator | Actions | Share | Gross | Median lag (blocks) | Median tx index |"
         " Median gas | Chains | EOAs |\n|---|---|---|---|---|---|---|---|---|"
     )
-    for c in s["competitors"]:
+    for c in s["liquidators"]:
         lag = c["median_lag_blocks"]
         idx = c["median_tx_index"]
         gas = c["median_gas_usd"]
@@ -366,7 +370,7 @@ def render_markdown(summary: dict[str, Any]) -> str:
     out.append(
         "| Liquidator | Gross | Actions | Median lag (blocks) | Chains |\n|---|---|---|---|---|"
     )
-    for c in s["competitors_by_profit"]:
+    for c in s["liquidators_by_profit"]:
         lag = c["median_lag_blocks"]
         out.append(
             f"| `{c['liquidator']}` | {_usd(c['gross_usd'])} | {c['count']} |"
@@ -374,8 +378,8 @@ def render_markdown(summary: dict[str, Any]) -> str:
         )
     out.append("")
 
-    out.append("## Competitor speed: blocks from 'liquidatable' to 'liquidated'")
-    out.append("| Lag | All liquidations | Net ≥ $5 (worth racing for) |\n|---|---|---|")
+    out.append("## Liquidation speed: blocks from 'liquidatable' to 'liquidated'")
+    out.append("| Lag | All liquidations | Net ≥ $5 |\n|---|---|---|")
     for every, meaningful in zip(s["lag"]["buckets"], s["lag"]["buckets_net_ge_5"], strict=True):
         out.append(f"| {every['bucket']} | {every['count']} | {meaningful['count']} |")
     medians = s["lag"]["median_seconds_by_chain"]
@@ -386,32 +390,33 @@ def render_markdown(summary: dict[str, Any]) -> str:
         )
     out.append("")
 
-    vis = s["our_visibility"]
-    out.append("## Our visibility")
+    vis = s["detector_coverage"]
+    out.append("## Detector coverage")
     out.append(
         f"- Liquidations with a borrower: **{vis['liquidations_with_borrower']}**\n"
-        f"- …while our watcher was online: **{vis['while_bot_online']}**\n"
-        f"- …of those, borrower already indexed by us: **{vis['borrower_known']}**"
-        f" ({_pct(vis['borrower_known'], vis['while_bot_online'])})\n"
-        f"- …seen liquidatable by us **before** the liquidation:"
-        f" **{vis['seen_before_liquidation']}**"
-        f" ({_pct(vis['seen_before_liquidation'], vis['while_bot_online'])})\n"
+        f"- …while the detector was online: **{vis['while_detector_online']}**\n"
+        f"- …of those, borrower already indexed: **{vis['borrower_known']}**"
+        f" ({_pct(vis['borrower_known'], vis['while_detector_online'])})\n"
+        f"- …detected as liquidatable **before** the liquidation:"
+        f" **{vis['detected_before_liquidation']}**"
+        f" ({_pct(vis['detected_before_liquidation'], vis['while_detector_online'])})\n"
         f"- Median lead time: "
         f"{'—' if vis['median_lead_seconds'] is None else f'{vis["median_lead_seconds"]:.1f}s'}"
     )
     out.append("")
 
-    add = s["addressable"]
-    out.append("## Addressable pool (Aave, net ≥ $5)")
+    add = s["profit_pool"]
+    out.append("## Profit pool (Aave, net ≥ $5)")
     out.append(
         f"- Liquidations: **{add['aave_liquidations_net_ge_5']}**, net {_usd(add['net_usd'])}"
         f" → projected **{_usd(add['projected_30d_net_usd'])} / 30 days** (all liquidators)\n"
-        f"- Seen first by us: **{add['seen_first_by_us']}**, net {_usd(add['seen_first_net_usd'])}"
+        f"- Detected before the liquidation: **{add['detected_first']}**,"
+        f" net {_usd(add['detected_first_net_usd'])}"
     )
     out.append("")
 
     sig = s["sightings"]
-    out.append("## Our sightings (liquidatable positions we saw)")
+    out.append("## Detected liquidatable positions (sightings)")
     out.append(
         f"- Episodes: **{sig['episodes']}** · outcomes: "
         + (", ".join(f"{k}: {v}" for k, v in sig["by_outcome"].items()) or "—")
@@ -460,7 +465,7 @@ async def run(days: int, fmt: str, table: str) -> None:
 
 def main() -> None:
     """Entry point."""
-    parser = argparse.ArgumentParser(description="Aegis market / competitor report")
+    parser = argparse.ArgumentParser(description="Aegis liquidation market report")
     parser.add_argument("--days", type=int, default=30)
     parser.add_argument("--format", choices=["md", "json", "csv"], default="md")
     parser.add_argument("--table", choices=["events", "sightings"], default="events")

@@ -1,4 +1,4 @@
-"""🚨 Liquidation opportunity message template."""
+"""🚨 Liquidatable position message template."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ PROTOCOL_NAMES = {"aave_v3": "Aave v3", "compound_v3": "Compound v3"}
 
 
 def render_opportunity(summary: OpportunitySummary) -> str:
-    """Render an opportunity alert in Telegram HTML."""
+    """Render a liquidatable position alert in Telegram HTML."""
     chain = CHAINS.get(summary.chain)
     network = chain.display_name if chain else summary.chain
     protocol = PROTOCOL_NAMES.get(summary.protocol, summary.protocol)
@@ -23,7 +23,7 @@ def render_opportunity(summary: OpportunitySummary) -> str:
     notes = f" · {esc(', '.join(summary.notes))}" if summary.notes else ""
     detected = summary.detected_at.strftime("%Y-%m-%d %H:%M:%S UTC")
     lines = [
-        "🚨 <b>Liquidation Opportunity</b>",
+        "🚨 <b>Liquidatable Position</b>",
         SEPARATOR,
         f"🌐 <b>Network:</b> {esc(network)}",
         f"🏦 <b>Protocol:</b> {esc(protocol)} · {esc(summary.market_name)}",
@@ -38,13 +38,13 @@ def render_opportunity(summary: OpportunitySummary) -> str:
         f"🎁 <b>Liquidation bonus:</b> {esc(ratio(summary.bonus_pct, 2))}%",
         f"⛽ <b>Gas (L2 + L1 data):</b> {esc(usd(summary.gas_cost_usd))}",
         SEPARATOR,
-        f"💰 <b>Est. net profit: {esc(usd(summary.net_profit_usd))}</b>",
+        f"💰 <b>Est. liquidator net profit: {esc(usd(summary.net_profit_usd))}</b>",
         "<blockquote>"
         f"Gross {esc(usd(summary.gross_profit_usd))} - gas {esc(usd(summary.gas_cost_usd))}."
-        f" Self-funded estimate at block <code>{summary.block_number}</code>{notes}.\n"
+        f" Estimate at block <code>{summary.block_number}</code>{notes}.\n"
         f"Position: debt {esc(usd(summary.total_debt_usd))}"
         f" / collateral {esc(usd(summary.total_collateral_usd))}"
         "</blockquote>",
-        f"🕒 {esc(detected)} · read-only mode (V1)",
+        f"🕒 {esc(detected)} · read-only analytics",
     ]
     return "\n".join(lines)

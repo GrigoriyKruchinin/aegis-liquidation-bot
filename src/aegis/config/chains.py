@@ -60,6 +60,8 @@ class ChainConfig:
     explorer_url: str
     alchemy_network: str | None
     reorg_safety_blocks: int
+    #: Chainlink `native_usd_feed` heartbeat: the longest interval between two updates.
+    native_feed_heartbeat_seconds: int = 86_400
     multicall3: str = MULTICALL3_ADDRESS
     aave_v3_addresses_provider: str | None = None
     compound_v3_markets: tuple[CometMarketConfig, ...] = field(default_factory=tuple)
@@ -89,6 +91,7 @@ BASE = ChainConfig(
     explorer_url="https://basescan.org",
     alchemy_network="base-mainnet",
     reorg_safety_blocks=10,
+    native_feed_heartbeat_seconds=1200,  # ETH/USD: 20 min heartbeat
     aave_v3_addresses_provider="0xe20fCBdBfFC4Dd138cE8b2E6FBb6CB49777ad64D",
     compound_v3_markets=(
         CometMarketConfig("cUSDCv3", "0xb125E6687d4313864e53df431d5425969c15Eb2F"),
@@ -129,6 +132,7 @@ OPTIMISM = ChainConfig(
     explorer_url="https://optimistic.etherscan.io",
     alchemy_network="opt-mainnet",
     reorg_safety_blocks=10,
+    native_feed_heartbeat_seconds=1200,  # ETH/USD: 20 min heartbeat
     aave_v3_addresses_provider="0xa97684ead0e402dC232d5A977953DF7ECBaB3CDb",
     compound_v3_markets=(
         CometMarketConfig("cUSDCv3", "0x2e44e174f7D53F0212823acC11C01A11d58c5bCB"),

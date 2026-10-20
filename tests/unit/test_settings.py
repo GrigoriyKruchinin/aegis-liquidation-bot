@@ -98,3 +98,11 @@ def test_log_rpc_urls_default_public_and_can_be_disabled(monkeypatch: pytest.Mon
     ]
     monkeypatch.setenv("BASE_LOG_RPC_URLS", "")
     assert make().log_rpc_urls_for("base") == []
+
+
+def test_native_feed_heartbeats() -> None:
+    from aegis.config.chains import CHAINS
+
+    assert CHAINS["base"].native_feed_heartbeat_seconds == 1200
+    assert CHAINS["optimism"].native_feed_heartbeat_seconds == 1200
+    assert CHAINS["arbitrum"].native_feed_heartbeat_seconds == 86_400

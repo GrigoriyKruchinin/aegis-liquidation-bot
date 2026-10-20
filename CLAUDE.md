@@ -1,26 +1,21 @@
 # CLAUDE.md — Aegis Liquidations (`aegis-liquidation-bot`)
 
-Multi-chain liquidation bot platform for EVM L2 networks. Strictly typed, async, SOLID, fully dockerized.
+Read-only liquidation analytics for EVM L2 lending markets, with Telegram notifications.
+Strictly typed, async, SOLID, fully dockerized.
 
 ## Language Policy
 
-- **Code, comments, docstrings, commit messages, docs, `README.md`, `todo.md`, agent/skill files:** English.
+- **Code, comments, docstrings, commit messages, docs, `README.md`, agent/skill files:** English.
 - **All interactive communication with the user (questions, guides, summaries):** Russian.
 
-## Roadmap Summary (see `todo.md` for the full checklist)
+## What the System Does
 
-| Version | Scope | Mode |
-|---|---|---|
-| V1 | Opportunity detector + Telegram alerts | Read-only, local (`docker-compose.local.yml`) |
-| V2 | Smart contracts, flash loans, Dynamic Liquidity Router, on-chain execution, CI/CD, reports | Active, VPS (`docker-compose.yml`) |
-| V3 | FastAPI admin dashboard (auth, analytics, Chart.js), multi-chain plugins | VPS |
-
-### Confirmed V1 Parameters
-
-- Networks: **Base, Arbitrum, Optimism**.
-- Protocols: **Aave v3** (all three chains) and **Compound v3 (Comet)**.
-- `MIN_PROFIT_USD=5` — minimum net profit (USD) to trigger a Telegram alert.
-- Admin dashboard credentials (V3): `ADMIN_USERNAME` + `ADMIN_PASSWORD_HASH` (bcrypt) in `.env`. Never commit real values; `.env.example` holds placeholders only.
+- **Networks:** Base, Arbitrum One, Optimism.
+- **Protocols:** Aave v3 and Compound v3 (Comet).
+- **Position monitoring:** discovers borrowers from events, re-checks health factors (full scans + a per-block watcher for near-liquidation positions) and alerts on liquidatable positions whose estimated net profit is at least `MIN_PROFIT_USD`.
+- **Market analytics:** indexes every liquidation on the monitored markets, values it at its block (debt, collateral, gas incl. L1 data fee), measures liquidator speed (blocks between "liquidatable" and "liquidated") and detector coverage.
+- **Telegram:** liquidatable position alerts, 🐋 large liquidation alerts, the 📈 daily market digest and the 📊 hourly status report.
+- **Reports:** `make market-report DAYS=N` → Markdown / JSON / CSV in `data/market/`.
 
 ## Tech Stack
 
@@ -28,28 +23,26 @@ Multi-chain liquidation bot platform for EVM L2 networks. Strictly typed, async,
 - `pydantic` v2 + `pydantic-settings` for config and validation.
 - `web3.py` (AsyncWeb3) + Multicall3 for batched RPC reads.
 - PostgreSQL + SQLAlchemy 2.x (AsyncIO, `asyncpg`) + Alembic.
-- Redis + Celery (scan scheduling via beat, notification queue).
+- Redis + Celery (beat schedule, queues `scan`, `market`, `enrich`, `notify`).
 - Telegram Bot API via `httpx` (HTML parse mode).
-- FastAPI + Jinja2 + Chart.js (V3).
-- Solidity + Foundry (V2).
-- Quality: `ruff` (lint + format), `mypy --strict`, `pytest` + `pytest-asyncio`.
+- Quality: `ruff` (lint + format), `mypy --strict`, `pytest` + `pytest-asyncio`; `anvil` (Foundry) for fork tests.
 
-## Planned Layout
+## Layout
 
 ```
 src/aegis/
-  config/      # pydantic-settings models, per-chain config
-  core/        # interfaces (ABCs/Protocols), domain models, DI container
-  chains/      # BaseChainProvider implementations (base, arbitrum, optimism)
+  config/      # pydantic-settings groups, static chain / market registry
+  core/        # interfaces (ABCs/Protocols), domain models, errors, DI container
+  chains/      # chain providers (generic EVM, OP-stack, Arbitrum), RPC budget, Multicall3
   protocols/   # BaseLendingProtocol implementations (aave_v3, compound_v3)
-  scanner/     # IHealthFactorScanner, borrower discovery / indexing
-  estimator/   # profit & gas estimation (incl. L1 data fee on OP-stack/Arbitrum)
-  executor/    # V2: Dynamic Liquidity Router, tx builder, flash loan adapters
-  notifier/    # INotifier implementations, Telegram templates
-  workers/     # Celery app, tasks, beat schedule
+  scanner/     # event indexers, health-factor scanner, orchestrator, per-block watcher
+  estimator/   # profit & gas estimation (incl. L1 data fee), Chainlink native price
+  market/      # liquidation stream, enrichment (valuation, gas, lag), lag search
+  reporting/   # status report and daily market digest builders
+  notifier/    # Telegram notifier and HTML templates
+  workers/     # Celery app, tasks, beat schedule, Redis tools, watcher entry point
   db/          # SQLAlchemy models, repositories, session factory
-  api/         # V3: FastAPI dashboard
-contracts/     # V2: Foundry project
+  tools/       # CLI tools: market report, RPC latency
 migrations/    # Alembic
 tests/{unit,integration}/
 ```
@@ -59,49 +52,47 @@ tests/{unit,integration}/
 | Command | Purpose |
 |---|---|
 | `make install` | `uv sync` (all groups) |
-| `make format` | `uv run ruff format . && uv run ruff check --fix .` |
-| `make format-check` | `uv run ruff format --check .` |
-| `make lint` | `uv run ruff check .` |
+| `make format` | `ruff format` + `ruff check --fix` |
+| `make format-check` / `make lint` | formatting / lint checks |
 | `make typecheck` | `uv run mypy src tests` (strict) |
-| `make test` | `uv run pytest` (pass `ARGS=...` for path/marker) |
+| `make test` | unit tests (`ARGS=...` for path / `-k`) |
+| `make test-integration` | DB repository tests + anvil fork test (`RUN_INTEGRATION=1`) |
 | `make check` | format-check + lint + typecheck + test |
-| `make migrate` | `uv run alembic upgrade head` |
-| `make up-local` / `make down-local` | `docker compose -f docker-compose.local.yml up -d --build` / `down` |
-| `make logs-local` | follow local compose logs |
-| `make contracts-test` | V2: `cd contracts && forge test -vvv` |
+| `make migrate` | `alembic upgrade head` |
+| `make up` / `make down` / `make ps` / `make logs` | Docker Compose stack |
+| `make market-report DAYS=N` | liquidation market report into `data/market/` |
+| `make rpc-latency` | compare configured RPC endpoints |
 
-Integration tests that hit a forked chain (anvil) are marked `@pytest.mark.integration` and skipped by default unless `RUN_INTEGRATION=1`.
+Integration tests are marked `@pytest.mark.integration` and skipped unless `RUN_INTEGRATION=1`. They use an isolated `<POSTGRES_DB>_test` database on `127.0.0.1:5433` and never touch live data.
 
 ## Code Style & Architecture Rules
 
 1. **SOLID is mandatory.**
-   - SRP: Scanner, Estimator, Executor, Celery Worker, Notifier, Dashboard are separate modules with no cross-responsibility.
+   - SRP: indexing, scanning, estimation, enrichment, reporting, notification and Celery wiring are separate modules.
    - OCP / Strategy: a new chain or lending protocol = a new class implementing `BaseChainProvider` / `BaseLendingProtocol` + a registry entry. **Never** edit the orchestrator to add one.
-   - LSP / ISP: narrow interfaces — `IFlashLoanProvider`, `INotifier`, `IHealthFactorScanner`, `IPriceOracle`, `IGasEstimator`, repositories.
-   - DIP: high-level modules depend on interfaces; wiring happens only in the DI container / factories (`core/container.py`).
-2. **Typing:** every function fully annotated; `mypy --strict` must pass. Prefer `Protocol`/`ABC` for interfaces, frozen pydantic models or `@dataclass(frozen=True, slots=True)` for domain values.
-3. **Money & amounts:** on-chain amounts are `int` (wei / token base units); USD values are `Decimal`. **Never use `float` for money.**
+   - LSP / ISP: narrow interfaces — `INotifier`, `INotificationDispatcher`, `ILiquidationAlertDispatcher`, `IHealthFactorScanner`, `IPriceOracle`, `IGasEstimator`, `IRateLimiter`, repositories.
+   - DIP: high-level modules depend on interfaces; wiring happens only in `core/container.py`.
+2. **Typing:** every function fully annotated; `mypy --strict` must pass. Prefer `Protocol`/`ABC` for interfaces and `@dataclass(frozen=True, slots=True)` for domain values.
+3. **Money & amounts:** on-chain amounts are `int` (base units); USD values are `Decimal`. **Never use `float` for money.**
 4. **Async:** all I/O (RPC, DB, Redis, HTTP) is async. No blocking calls in the event loop. Batch reads via Multicall3; avoid N+1 RPC calls.
-5. **Secrets:** loaded only via `pydantic-settings` (`SecretStr`). Never log, print, or include secrets in exceptions/notifications. V1 loads **no private keys**.
-6. **Telegram:** HTML parse mode, all dynamic values escaped (`html.escape`), templates live in `notifier/templates`. Use emojis, `<b>` highlights, separators, `<blockquote>`, `<code>` for addresses/hashes.
-7. **Logging:** structured (`structlog` or stdlib JSON), include `chain`, `protocol`, `borrower`, `opportunity_id` context.
-8. **Errors:** specific exception classes in `core/errors.py`; no bare `except`. RPC calls wrapped with retries + timeouts.
-9. **Tests:** every new module ships with unit tests; external services mocked behind interfaces.
-10. Ruff line length 100; imports sorted by ruff; docstrings in Google style for public APIs.
+5. **RPC budget:** every request goes through the provider's `_request` (retries, timeouts, failover, compute-unit limiter). `eth_getLogs` prefers the log-only endpoints.
+6. **Secrets:** loaded only via `pydantic-settings` (`SecretStr`). Never log, print, or include secrets in exceptions/notifications; use `aegis.core.redact`.
+7. **Telegram:** HTML parse mode, every dynamic value escaped with `esc`, templates live in `notifier/templates`. Use emojis, `<b>` highlights, separators, `<blockquote>`, `<code>` for addresses/hashes.
+8. **Logging:** structured JSON (`structlog`), with `chain`, `protocol`, `market`, `borrower` context.
+9. **Errors:** specific exception classes in `core/errors.py`; no bare `except`.
+10. **Database changes** ship as a new Alembic migration; never edit an applied one.
+11. **Tests:** every change ships with unit tests; external services are mocked behind interfaces.
+12. Ruff line length 100; imports sorted by ruff; Google-style docstrings for public APIs.
 
 ## Safety Invariants
 
-- V1 is strictly read-only: no signer, no `eth_sendRawTransaction`.
-- V2: `ALLOW_FLASH_LOANS: bool` is a hard kill switch — when `False`, no flash-loan path is ever built.
-- Dynamic Liquidity Router: self-fund if hot wallet balance ≥ required debt → else flash loan only if allowed AND still profitable after fee → else skip and log the reason.
-- Every transaction is simulated (`eth_call`) before sending; contracts are owner-only.
+- The system is strictly read-only: no private keys, no signer, no `eth_sendRawTransaction`.
+- Historical backfills never trigger real-time alerts (`MARKET_ALERT_MAX_AGE_MINUTES`).
+- Notifications are idempotent (Redis sent-markers) and deduplicated per position.
 
 ## Workflow
 
-1. Pick the next unchecked task from `todo.md`.
-2. Implement via the **implementation-agent** (`.claude/agents/implementation-agent.md`) conventions.
-3. Run `/check-code-quality` and `/run-tests`.
-4. For anything touching keys, RPC, money math, contracts, or execution, run `/audit-security` (uses **security-critic-agent**).
-5. Tick the box in `todo.md`. Commit only when the user asks.
-
-Before starting V1 implementation, give the user (in Russian) the Telegram BotFather / `TELEGRAM_CHAT_ID` / local `.env` guide. Before V2, give the VPS / SSH / Docker / deploy keys / gas wallet guide.
+1. A new feature or a bug fix is implemented by the **developer-agent** (`.claude/agents/developer-agent.md`).
+2. Run `/check-code-quality` and `/run-tests`.
+3. Changes touching RPC, secrets, money math, the database or notifications are reviewed by the **security-critic-agent** via `/audit-security`.
+4. Commit only when the user asks.

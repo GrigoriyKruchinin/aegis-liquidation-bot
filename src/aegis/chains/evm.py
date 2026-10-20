@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, TypeVar, cast
 
@@ -56,6 +57,8 @@ _FAILOVER_ERRORS: tuple[type[BaseException], ...] = (TimeoutError, *_TRANSIENT_E
 # A real outage also shrinks the window, but the indexer then gives up and restarts at full size.
 _LOG_RANGE_HTTP_STATUSES = frozenset({400, 413, 500})
 RATE_LIMIT_MAX_DELAY_SECONDS = 10.0
+#: After failing over, a route tries its primary endpoint again after this long.
+PRIMARY_RETRY_SECONDS = 60.0
 BLOCK_TIME_CACHE_SIZE = 10_000
 
 _LOG_RANGE_HINTS = (
@@ -147,6 +150,15 @@ def _make_client(url: SecretStr) -> Client:
     return client
 
 
+class _RouteExhaustedError(Exception):
+    """Internal: every endpoint of a route failed (carries what the summary needs)."""
+
+    def __init__(self, deterministic: list[RpcError], not_found: bool) -> None:
+        super().__init__("route exhausted")
+        self.deterministic = deterministic
+        self.not_found = not_found
+
+
 class EvmChainProvider(BaseChainProvider):
     """Read-only provider for any EVM chain without an L1 data fee.
 
@@ -197,6 +209,11 @@ class EvmChainProvider(BaseChainProvider):
         # pull latency-critical calls away from the primary provider.
         self._routes: dict[str, list[int]] = {"default": main_route, "eth_getLogs": log_route}
         self._active: dict[str, int] = dict.fromkeys(self._routes, 0)
+        self._failed_over_at: dict[str, float] = {}
+        # Bumped whenever a route's active endpoint changes: a request that started under an
+        # older generation must not override a newer decision when it finishes.
+        self._generation: dict[str, int] = dict.fromkeys(self._routes, 0)
+        self._probing: set[str] = set()
         self._high_priority = high_priority
         self._timeout = timeout_seconds
         self._attempts = max_retries + 1
@@ -207,62 +224,115 @@ class EvmChainProvider(BaseChainProvider):
     async def _request(self, op: str, fn: Callable[[Client], Awaitable[T]]) -> T:
         """Run `fn` against the active endpoint, falling back to the others on failure."""
         errors: list[str] = []
-        deterministic: list[RpcError] = []
-        not_found = False
         cost = method_cost(op)
         route_name = op if op in self._routes else "default"
         route = self._routes[route_name]
-        async with self._semaphore:
-            for offset in range(len(route)):
-                position = (self._active[route_name] + offset) % len(route)
-                index = route[position]
-                client = self._clients[index]
-                bucket = self._buckets[index]
-                limiter = self._limiters[index]
-
-                async def wait_budget(
-                    bucket: str = bucket, limiter: IRateLimiter = limiter
-                ) -> None:
-                    await limiter.acquire(bucket, cost, high_priority=self._high_priority)
-
-                try:
-                    result = await retry_async(
-                        lambda client=client: fn(client),  # type: ignore[misc]
-                        attempts=self._attempts,
-                        timeout_seconds=self._timeout,
-                        retry_on=_TRANSIENT_ERRORS,
-                        before_attempt=wait_budget,
-                        retry_delay=_rate_limit_delay,
-                    )
-                except ContractLogicError as exc:
-                    raise ContractCallError(f"{op} reverted: {redact(str(exc))}") from None
-                except (LogRangeTooLargeError, HistoricalStateUnavailableError) as exc:
-                    # Another endpoint may accept the range / be an archive node: try it first.
-                    deterministic.append(exc)
-                    errors.append(f"endpoint#{index}: {safe_error(exc)}")
-                    continue
-                except (TransactionNotFound, BlockNotFound) as exc:
-                    not_found = True
-                    errors.append(f"endpoint#{index}: {type(exc).__name__}")
-                    continue
-                except _FAILOVER_ERRORS as exc:
-                    errors.append(f"endpoint#{index}: {safe_error(exc)}")
-                    logger.warning(
-                        "rpc_endpoint_failed",
-                        chain=self.name,
-                        op=op,
-                        endpoint=index,
-                        error=safe_error(exc),
-                    )
-                    continue
-                self._active[route_name] = position
-                return result
+        generation = self._generation[route_name]
+        start = self._active[route_name]
+        order = [(start + offset) % len(route) for offset in range(len(route))]
+        probe = self._claim_primary_probe(route_name)
+        if probe:  # one request re-tries the primary, the others keep using the fallback
+            order = [0, *(p for p in order if p != 0)]
+        try:
+            return await self._run_route(
+                op, fn, route_name, route, order, generation, probe, errors, cost
+            )
+        except _RouteExhaustedError as exhausted:
+            deterministic, not_found = exhausted.deterministic, exhausted.not_found
+        finally:
+            if probe:
+                self._probing.discard(route_name)
         summary = f"{self.name} {op} failed on all endpoints: {'; '.join(errors)}"
         if deterministic and len(deterministic) == len(errors):
             raise type(deterministic[0])(summary)
         if not_found:
             raise ChainDataNotFoundError(summary)
         raise RpcError(summary)
+
+    async def _run_route(
+        self,
+        op: str,
+        fn: Callable[[Client], Awaitable[T]],
+        route_name: str,
+        route: list[int],
+        order: list[int],
+        generation: int,
+        probe: bool,
+        errors: list[str],
+        cost: int,
+    ) -> T:
+        deterministic: list[RpcError] = []
+        not_found = False
+        for position in order:
+            index = route[position]
+            client = self._clients[index]
+            bucket = self._buckets[index]
+            limiter = self._limiters[index]
+
+            async def wait_budget(bucket: str = bucket, limiter: IRateLimiter = limiter) -> None:
+                await limiter.acquire(bucket, cost, high_priority=self._high_priority)
+
+            try:
+                result = await retry_async(
+                    lambda client=client: fn(client),  # type: ignore[misc]
+                    # A probe of a possibly dead primary must not cost a full retry cycle.
+                    attempts=1 if probe and position == 0 else self._attempts,
+                    timeout_seconds=self._timeout,
+                    retry_on=_TRANSIENT_ERRORS,
+                    before_attempt=wait_budget,
+                    retry_delay=_rate_limit_delay,
+                    concurrency=self._semaphore,
+                )
+            except ContractLogicError as exc:
+                raise ContractCallError(f"{op} reverted: {redact(str(exc))}") from None
+            except (LogRangeTooLargeError, HistoricalStateUnavailableError) as exc:
+                # Another endpoint may accept the range / be an archive node: try it first.
+                deterministic.append(exc)
+                errors.append(f"endpoint#{index}: {safe_error(exc)}")
+                continue
+            except (TransactionNotFound, BlockNotFound) as exc:
+                not_found = True
+                errors.append(f"endpoint#{index}: {type(exc).__name__}")
+                continue
+            except _FAILOVER_ERRORS as exc:
+                errors.append(f"endpoint#{index}: {safe_error(exc)}")
+                logger.warning(
+                    "rpc_endpoint_failed",
+                    chain=self.name,
+                    op=op,
+                    endpoint=index,
+                    error=safe_error(exc),
+                )
+                if probe and position == 0:
+                    self._failed_over_at[route_name] = time.monotonic()  # next probe later
+                continue
+            self._on_success(route_name, position, generation)
+            return result
+        raise _RouteExhaustedError(deterministic, not_found)
+
+    def _claim_primary_probe(self, route: str) -> bool:
+        """True for the single request allowed to re-try the primary after the retry window."""
+        since = self._failed_over_at.get(route)
+        if (
+            since is None
+            or route in self._probing
+            or time.monotonic() - since < PRIMARY_RETRY_SECONDS
+        ):
+            return False
+        self._probing.add(route)
+        return True
+
+    def _on_success(self, route: str, position: int, generation: int) -> None:
+        if position == self._active[route]:
+            return
+        if position == 0:  # the primary answered: return to it
+            self._failed_over_at.pop(route, None)
+        elif generation != self._generation[route]:
+            return  # the route changed while this request was in flight: keep the newer state
+        else:
+            self._failed_over_at[route] = time.monotonic()
+        self._active[route] = position
+        self._generation[route] += 1
 
     async def block_number(self) -> int:
         """Latest block number."""

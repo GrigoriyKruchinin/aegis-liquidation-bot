@@ -29,7 +29,7 @@ def test_formatting_helpers() -> None:
 
 def test_opportunity_template_contents() -> None:
     text = render_opportunity(summary())
-    assert "🚨 <b>Liquidation Opportunity</b>" in text
+    assert "🚨 <b>Liquidatable Position</b>" in text
     assert "Base" in text and "Aave v3" in text
     assert "<code>0x1111111111111111111111111111111111111111</code>" in text
     assert "https://basescan.org/address/0x1111111111111111111111111111111111111111" in text

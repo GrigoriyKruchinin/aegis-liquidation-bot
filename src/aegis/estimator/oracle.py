@@ -16,6 +16,8 @@ LATEST_ROUND_DATA = AbiFunction(
 )
 DECIMALS = AbiFunction("decimals()", ("uint8",))
 HISTORY_CACHE_SIZE = 5_000
+#: Tolerance on top of a feed's heartbeat (update transactions can land late).
+STALENESS_MARGIN_SECONDS = 600
 
 
 class ChainlinkNativePriceOracle:

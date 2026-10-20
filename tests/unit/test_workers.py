@@ -62,9 +62,13 @@ def test_beat_schedule_per_chain() -> None:
         "market-index-base",
         "market-index-optimism",
         "market-enrich",
+        "market-digest",
         "status-report",
     }
     assert schedule["status-report"]["schedule"] == 3600.0  # hourly by default
+    assert schedule["market-enrich"]["options"]["queue"] == "enrich"
+    digest = schedule["market-digest"]
+    assert digest["options"]["queue"] == "notify" and digest["schedule"].hour == {9}
     assert schedule["status-report"]["options"]["queue"] == "notify"
     assert schedule["scan-full-base"]["options"]["queue"] == "scan"
 
@@ -77,3 +81,37 @@ def test_status_report_can_be_disabled() -> None:
         status_report_interval_hours=0,
     )
     assert "status-report" not in build_beat_schedule(settings)
+
+
+def test_market_digest_can_be_disabled() -> None:
+    settings = AppSettings(
+        _env_file=None,
+        telegram_bot_token=SecretStr("1:x"),
+        telegram_chat_id="1",
+        market_digest_hour_utc=-1,
+    )
+    assert "market-digest" not in build_beat_schedule(settings)
+
+
+def test_enrich_task_routed_to_enrich_queue() -> None:
+    from aegis.workers.app import app
+
+    route = app.amqp.router.route({}, "aegis.market.enrich")
+    assert route["queue"].name == "enrich"
+    assert app.amqp.router.route({}, "aegis.market.index")["queue"].name == "market"
+
+
+def test_celery_beat_receives_every_schedule_setting() -> None:
+    """celery-beat gets no `.env`: each schedule setting must be passed explicitly."""
+    from pathlib import Path
+
+    from aegis.config.settings import SchedulerSettings, _EnvSettings
+
+    compose = (Path(__file__).parents[2] / "docker-compose.yml").read_text()
+    beat = compose.split("  celery-beat:", 1)[1].split("\nvolumes:", 1)[0]
+    missing = [
+        name.upper()
+        for name in SchedulerSettings.model_fields.keys() - _EnvSettings.model_fields.keys()
+        if name != "redis_url" and f"{name.upper()}:" not in beat
+    ]
+    assert missing == []

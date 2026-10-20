@@ -9,6 +9,7 @@ from decimal import Decimal
 from sqlalchemy import (
     Boolean,
     ColumnElement,
+    Select,
     Table,
     bindparam,
     func,
@@ -29,6 +30,7 @@ from aegis.core.models import (
     EventEnrichment,
     HealthCheck,
     LiquidationEvent,
+    LiquidationRecord,
     MarketRef,
     MarketStats,
     OpportunitySummary,
@@ -55,6 +57,10 @@ def _market_filter(market: MarketRef) -> tuple[ColumnElement[bool], ...]:
         BorrowerRow.protocol == market.protocol,
         BorrowerRow.market == market.address,
     )
+
+
+#: Event kinds that carry a liquidator's profit (enriched before Comet absorb bookkeeping).
+PRIORITY_ENRICH_KINDS = ("aave_liquidation", "comet_buy")
 
 
 class SqlBorrowerRepository:
@@ -404,18 +410,32 @@ class SqlLiquidationEventRepository:
     async def pending(
         self, limit: int, max_attempts: int
     ) -> list[tuple[int, int, LiquidationEvent]]:
-        """Oldest events that still need enrichment."""
-        stmt = (
-            select(LiquidationEventRow)
-            .where(
-                LiquidationEventRow.enriched.is_(False),
-                LiquidationEventRow.enrich_attempts < max_attempts,
+        """Events that still need enrichment: paid liquidations first, then the rest, oldest first.
+
+        Thousands of Comet cleanup absorbs must not delay paid liquidations. Two bounded queries
+        (each served by the partial `ix_liquidation_events_pending` index) avoid sorting the
+        whole backlog.
+        """
+
+        def batch(priority: bool, size: int) -> Select[LiquidationEventRow]:
+            kind = LiquidationEventRow.kind
+            return (
+                select(LiquidationEventRow)
+                .where(
+                    LiquidationEventRow.enriched.is_(False),
+                    LiquidationEventRow.enrich_attempts < max_attempts,
+                    kind.in_(PRIORITY_ENRICH_KINDS)
+                    if priority
+                    else kind.not_in(PRIORITY_ENRICH_KINDS),
+                )
+                .order_by(LiquidationEventRow.block_number)
+                .limit(size)
             )
-            .order_by(LiquidationEventRow.block_number)
-            .limit(limit)
-        )
+
         async with self._sessions() as session:
-            rows = (await session.scalars(stmt)).all()
+            rows = list((await session.scalars(batch(True, limit))).all())
+            if len(rows) < limit:
+                rows += (await session.scalars(batch(False, limit - len(rows)))).all()
         return [
             (
                 row.id,
@@ -512,7 +532,7 @@ class SqlLiquidationEventRepository:
             await session.execute(stmt)
 
     async def borrower_known(self, market: MarketRef, borrower: str, before_block: int) -> bool:
-        """True if the borrower was discovered by our indexer before `before_block`."""
+        """True if the borrower was discovered by the indexer before `before_block`."""
         stmt = select(func.count()).where(
             *_market_filter(market),
             BorrowerRow.address == borrower,
@@ -520,6 +540,66 @@ class SqlLiquidationEventRepository:
         )
         async with self._sessions() as session:
             return bool(await session.scalar(stmt))
+
+    async def enriched_between(
+        self, since: datetime, until: datetime, kinds: Sequence[str]
+    ) -> list[LiquidationRecord]:
+        """Enriched events of `kinds` with ``since <= block_time < until``, oldest first."""
+        stmt = (
+            select(LiquidationEventRow)
+            .where(
+                LiquidationEventRow.enriched.is_(True),
+                LiquidationEventRow.kind.in_(list(kinds)),
+                LiquidationEventRow.block_time >= since,
+                LiquidationEventRow.block_time < until,
+            )
+            .order_by(LiquidationEventRow.block_time)
+        )
+        async with self._sessions() as session:
+            rows = (await session.scalars(stmt)).all()
+        return [_to_record(row) for row in rows]
+
+    async def get_record(self, event_id: int) -> LiquidationRecord:
+        """One enriched event.
+
+        Raises:
+            NotFoundError: if it does not exist or is not enriched yet.
+        """
+        async with self._sessions() as session:
+            row = await session.get(LiquidationEventRow, event_id)
+        if row is None or not row.enriched or row.block_time is None:
+            raise NotFoundError(f"enriched liquidation event {event_id} not found")
+        return _to_record(row)
+
+    async def pending_count(self) -> int:
+        """Events still waiting for enrichment."""
+        stmt = select(func.count()).where(LiquidationEventRow.enriched.is_(False))
+        async with self._sessions() as session:
+            return int(await session.scalar(stmt) or 0)
+
+
+def _to_record(row: LiquidationEventRow) -> LiquidationRecord:
+    assert row.block_time is not None  # noqa: S101  # enriched rows always carry it
+    return LiquidationRecord(
+        id=row.id,
+        chain=row.chain,
+        market_name=row.market_name,
+        kind=row.kind,
+        tx_hash=row.tx_hash,
+        block_number=row.block_number,
+        block_time=row.block_time,
+        liquidator=row.liquidator,
+        tx_index=row.tx_index,
+        debt_symbol=row.debt_symbol,
+        collateral_symbol=row.collateral_symbol,
+        debt_usd=row.debt_usd,
+        gross_profit_usd=row.gross_profit_usd,
+        gas_cost_usd=row.gas_cost_usd,
+        net_profit_usd=row.net_profit_usd,
+        lag_blocks=row.lag_blocks,
+        lag_capped=row.lag_capped,
+        follow_up=bool(row.follow_up),
+    )
 
 
 class SqlSightingRepository:

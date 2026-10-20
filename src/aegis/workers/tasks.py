@@ -14,10 +14,13 @@ from aegis.core.errors import NotFoundError, NotificationError, TelegramRateLimi
 from aegis.core.logging import configure_logging, get_logger
 from aegis.core.redact import safe_error
 from aegis.notifier.templates import render_opportunity, render_startup, render_status
+from aegis.notifier.templates.market import render_digest, render_large_liquidation
 from aegis.scanner.orchestrator import ScanMode, alert_key
 from aegis.workers import runtime
 from aegis.workers.app import app
 from aegis.workers.dispatcher import (
+    NOTIFY_DIGEST_TASK,
+    NOTIFY_LIQUIDATION_TASK,
     NOTIFY_OPPORTUNITY_TASK,
     NOTIFY_STATUS_TASK,
     NOTIFY_SYSTEM_TASK,
@@ -80,7 +83,7 @@ def index_chain(chain: str) -> dict[str, Any]:
 
 @app.task(name="aegis.market.index", ignore_result=True)
 def market_index(chain: str) -> dict[str, Any]:
-    """Index competitors' liquidation events on `chain`."""
+    """Index liquidation events on `chain`."""
 
     async def body(c: Container) -> dict[str, Any]:
         async with c.locks.hold(f"market_index:{chain}", 30 * 60) as acquired:
@@ -187,6 +190,51 @@ def notify_status(self: Task[Any, Any]) -> None:
         except NotificationError as exc:
             await c.notifications.record(None, "telegram", "failed", safe_error(exc))
             raise self.retry(countdown=60, exc=exc) from exc
+        await c.notifications.record(None, "telegram", "sent")
+
+    runtime.run(body)
+
+
+@app.task(name=NOTIFY_LIQUIDATION_TASK, bind=True, max_retries=3, ignore_result=True)
+def notify_liquidation(self: Task[Any, Any], event_id: int) -> None:
+    """Deliver the 🐋 large liquidation alert for an enriched event (idempotent)."""
+
+    async def body(c: Container) -> None:
+        if await was_sent(c.redis, event_id, "liquidation"):
+            return
+        try:
+            record = await c.events.get_record(event_id)
+        except NotFoundError:
+            logger.error("liquidation_event_missing", event_id=event_id)
+            return
+        try:
+            await c.notifier.send(render_large_liquidation(record))
+        except NotificationError as exc:
+            await c.notifications.record(None, "telegram", "failed", safe_error(exc))
+            countdown = exc.retry_after_seconds if isinstance(exc, TelegramRateLimitError) else 60
+            raise self.retry(countdown=countdown, exc=exc) from exc
+        await mark_sent(c.redis, event_id, "liquidation")
+        await c.notifications.record(None, "telegram", "sent")
+
+    runtime.run(body)
+
+
+@app.task(name=NOTIFY_DIGEST_TASK, bind=True, max_retries=3, ignore_result=True)
+def notify_digest(self: Task[Any, Any]) -> None:
+    """Build and deliver the daily 📈 liquidation market digest."""
+
+    async def body(c: Container) -> None:
+        digest = await c.digest_reporter.build(hours=24)
+        day = int(digest.until.strftime("%Y%m%d"))  # one digest per day, even if redelivered
+        if await was_sent(c.redis, day, "digest"):
+            return
+        try:
+            await c.notifier.send(render_digest(digest))
+        except NotificationError as exc:
+            await c.notifications.record(None, "telegram", "failed", safe_error(exc))
+            countdown = exc.retry_after_seconds if isinstance(exc, TelegramRateLimitError) else 120
+            raise self.retry(countdown=countdown, exc=exc) from exc
+        await mark_sent(c.redis, day, "digest")
         await c.notifications.record(None, "telegram", "sent")
 
     runtime.run(body)

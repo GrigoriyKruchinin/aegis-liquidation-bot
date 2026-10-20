@@ -118,13 +118,20 @@ class NotificationRow(Base):
 
 
 class LiquidationEventRow(Base):
-    """On-chain liquidation activity (ours to measure the market and competitors)."""
+    """On-chain liquidation activity (liquidation market analytics)."""
 
     __tablename__ = "liquidation_events"
     __table_args__ = (
         UniqueConstraint("chain", "tx_hash", "log_index", name="uq_liquidation_events_log"),
         Index("ix_liquidation_events_block_time", "block_time"),
         Index("ix_liquidation_events_enriched", "enriched"),
+        # Enrichment queue: `pending()` scans it by kind group in block order.
+        Index(
+            "ix_liquidation_events_pending",
+            "kind",
+            "block_number",
+            postgresql_where=text("NOT enriched"),
+        ),
         Index("ix_liquidation_events_market_borrower", "chain", "protocol", "market", "borrower"),
     )
 
@@ -172,7 +179,7 @@ class LiquidationEventRow(Base):
     #: True when the position was already liquidatable at the start of the search window.
     lag_capped: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     #: Another liquidation of the same borrower happened shortly before (partial liquidation
-    #: series): excluded from competitor-speed statistics.
+    #: series): excluded from liquidation-speed statistics.
     follow_up: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     #: Why USD value / lag are missing ("no_archive", "dust", ...), if they are.
     data_gaps: Mapped[str | None] = mapped_column(String(64), nullable=True)

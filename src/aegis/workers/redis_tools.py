@@ -83,18 +83,19 @@ async def heartbeat_age_seconds(redis: Redis, name: str = "scan") -> float | Non
 SENT_MARKER_TTL_SECONDS = 7 * 24 * 3600
 
 
-def _sent_key(opportunity_id: int) -> str:
-    return f"aegis:sent:{opportunity_id}"
+def _sent_key(item_id: int, kind: str) -> str:
+    # Opportunities keep the original key layout so markers survive upgrades.
+    return f"aegis:sent:{item_id}" if kind == "opportunity" else f"aegis:sent:{kind}:{item_id}"
 
 
-async def was_sent(redis: Redis, opportunity_id: int) -> bool:
-    """True if the alert for this opportunity was already delivered."""
-    return bool(await redis.exists(_sent_key(opportunity_id)))
+async def was_sent(redis: Redis, item_id: int, kind: str = "opportunity") -> bool:
+    """True if the alert for this item (opportunity / liquidation) was already delivered."""
+    return bool(await redis.exists(_sent_key(item_id, kind)))
 
 
-async def mark_sent(redis: Redis, opportunity_id: int) -> None:
+async def mark_sent(redis: Redis, item_id: int, kind: str = "opportunity") -> None:
     """Record delivery right after Telegram accepted the message (makes retries idempotent)."""
-    await redis.set(_sent_key(opportunity_id), "1", ex=SENT_MARKER_TTL_SECONDS)
+    await redis.set(_sent_key(item_id, kind), "1", ex=SENT_MARKER_TTL_SECONDS)
 
 
 # Token bucket refilled continuously at `rate` units/s up to `capacity`.

@@ -62,8 +62,7 @@ def test_render_status_indexing_and_activity() -> None:
         )
     )
     assert (
-        "🏁 <b>Market liquidations:</b> 7 · liquidators earned $123.40 · seen by us first: 3"
-        in text
+        "🏁 <b>Market liquidations:</b> 7 · liquidators earned $123.40 · detected first: 3" in text
     )
     assert "⏳ indexing, ~2h 15m behind" in text
     assert "🔎 <b>Opportunities:</b> 2 (best $42.00)" in text

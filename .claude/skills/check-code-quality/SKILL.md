@@ -11,7 +11,7 @@ description: Run ruff format check, ruff lint, and mypy --strict for Aegis Liqui
    make lint
    make typecheck
    ```
-   If the Makefile does not exist yet, use `uv run ruff format --check .`, `uv run ruff check .`, `uv run mypy src tests`.
+   Equivalent commands: `uv run ruff format --check .`, `uv run ruff check .`, `uv run mypy src tests`.
 2. Summarize results grouped by tool: number of issues, then each issue as `file:line — message`.
 3. If the user passed `fix` as an argument (or asked to fix), run `make format` (`ruff format` + `ruff check --fix`), then fix remaining lint and mypy errors by hand, and re-run all three checks until clean.
 4. Never silence errors with blanket `# noqa` / `# type: ignore`; if suppression is unavoidable, use a specific code and a one-line reason.

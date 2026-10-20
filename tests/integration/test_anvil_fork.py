@@ -196,5 +196,5 @@ async def test_detects_crafted_underwater_aave_position(
     assert estimate.quote.debt_to_cover_usd <= pos.total_debt_usd
 
     text = render_opportunity(OpportunitySummary.from_opportunity(opportunity))
-    assert "Liquidation Opportunity" in text and check.borrower in text
+    assert "Liquidatable Position" in text and check.borrower in text
     await asyncio.sleep(0)

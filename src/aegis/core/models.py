@@ -150,7 +150,7 @@ class Position:
 
 @dataclass(frozen=True, slots=True)
 class TxTemplate:
-    """Unsigned call used for gas and L1 data-fee estimation (never sent in V1)."""
+    """Unsigned call used for gas and L1 data-fee estimation (never sent)."""
 
     to: str
     data: bytes
@@ -307,7 +307,7 @@ class ActivityStats:
     market_liquidations: int = 0
     #: Profit realised by liquidators in the period (Aave + Comet buyCollateral, before gas).
     market_gross_usd: Decimal = Decimal(0)
-    #: Of `market_liquidations`, how many our bot had seen liquidatable beforehand.
+    #: Of `market_liquidations`, how many the detector had seen liquidatable beforehand.
     market_seen_first: int = 0
 
 
@@ -427,7 +427,82 @@ class EventEnrichment:
 
     @property
     def our_lead_seconds(self) -> Decimal | None:
-        """How long before the liquidation our bot first saw the position liquidatable."""
+        """How long before the liquidation the detector first saw the position liquidatable."""
         if self.our_first_seen_at is None:
             return None
         return Decimal(str((self.block_time - self.our_first_seen_at).total_seconds()))
+
+
+@dataclass(frozen=True, slots=True)
+class LiquidationRecord:
+    """An enriched liquidation as read back for analytics (digest, alerts)."""
+
+    id: int
+    chain: str
+    market_name: str
+    kind: str
+    tx_hash: str
+    block_number: int
+    block_time: datetime
+    liquidator: str
+    tx_index: int | None
+    debt_symbol: str | None
+    collateral_symbol: str | None
+    debt_usd: Decimal | None
+    gross_profit_usd: Decimal | None
+    gas_cost_usd: Decimal | None
+    net_profit_usd: Decimal | None
+    lag_blocks: int | None
+    lag_capped: bool | None
+    follow_up: bool
+
+
+@dataclass(frozen=True, slots=True)
+class LiquidatorStats:
+    """One liquidator contract's activity within a digest period."""
+
+    liquidator: str
+    liquidations: int
+    net_profit_usd: Decimal
+    chains: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ChainDigest:
+    """Per-chain totals of a digest period (paid liquidations only).
+
+    Attributes:
+        volume_usd: Aave debt repaid plus the base asset Comet buyers paid for collateral.
+    """
+
+    chain: str
+    liquidations: int
+    volume_usd: Decimal
+    net_profit_usd: Decimal
+
+
+@dataclass(frozen=True, slots=True)
+class MarketDigest:
+    """Liquidation market summary for a period (the daily 📈 Telegram digest).
+
+    Attributes:
+        meaningful: Liquidations with net profit at or above the digest threshold.
+        same_block: Of `meaningful` with a measured lag, how many happened in the block the
+            position became liquidatable.
+        lag_measured: How many of `meaningful` have a measured (uncapped) lag.
+        pending: Events not enriched yet (their values are missing from the totals).
+        unpriced: Enriched events without a net profit (pricing gaps), excluded from totals.
+    """
+
+    since: datetime
+    until: datetime
+    chains: tuple[ChainDigest, ...]
+    top_liquidations: tuple[LiquidationRecord, ...]
+    top_liquidators: tuple[LiquidatorStats, ...]
+    meaningful: int
+    meaningful_net_usd: Decimal
+    same_block: int
+    lag_measured: int
+    pending: int
+    threshold_usd: Decimal
+    unpriced: int = 0
